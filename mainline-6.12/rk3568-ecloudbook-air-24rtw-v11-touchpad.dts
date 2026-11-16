@@ -1,0 +1,12 @@
+// SPDX-License-Identifier: (GPL-2.0+ OR MIT)
+/*
+ * P4-2 Variable 1 (v11): Enable &i2c4 I2C-HID Touchpad (touchpad@2c)
+ * Strictly single-variable delta on top of v10-419align-edp:
+ *  - &i2c4 (fe5d0000.i2c, i2c4m0_xfer, hid-over-i2c @0x2c, IRQ GPIO3_PB3) -> "okay"
+ */
+
+#include "rk3568-ecloudbook-air-24rtw-v10-419align-edp.dts"
+
+&i2c4 {
+	status = "okay";
+};

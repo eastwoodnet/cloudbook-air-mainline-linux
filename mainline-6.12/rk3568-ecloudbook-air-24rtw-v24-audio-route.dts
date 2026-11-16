@@ -1,0 +1,14 @@
+// SPDX-License-Identifier: (GPL-2.0+ OR MIT)
+#include "rk3568-ecloudbook-air-24rtw-v23-sdio-cmd11.dts"
+
+&rk809_sound {
+	simple-audio-card,routing =
+		"Headphones Amplifier INL", "HPOL",
+		"Headphones Amplifier INR", "HPOR",
+		"Headphones", "Headphones Amplifier OUTL",
+		"Headphones", "Headphones Amplifier OUTR",
+		"Speaker Amplifier INL", "HPOL",
+		"Speaker Amplifier INR", "HPOR",
+		"Speaker", "Speaker Amplifier OUTL",
+		"Speaker", "Speaker Amplifier OUTR";
+};

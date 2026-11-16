@@ -1,0 +1,14 @@
+// SPDX-License-Identifier: (GPL-2.0+ OR MIT)
+/*
+ * P4-2 Variable 5 (v15): Unblock SBS Smart Battery Fuel Gauge (&battery_gauge)
+ * Strictly single-variable delta on top of v14-audio:
+ *  - Delete power-supplies = <&bq25703> from &battery_gauge because mainline
+ *    6.12 has no charger driver for ti,bq25703a at 0-006b, causing fw_devlink
+ *    and devm_power_supply_register to defer 0-000b indefinitely.
+ */
+
+#include "rk3568-ecloudbook-air-24rtw-v14-audio.dts"
+
+&battery_gauge {
+	/delete-property/ power-supplies;
+};

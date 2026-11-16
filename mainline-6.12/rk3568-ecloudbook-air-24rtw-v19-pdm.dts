@@ -1,0 +1,17 @@
+// SPDX-License-Identifier: (GPL-2.0+ OR MIT)
+/*
+ * P4-2 Variable 9 (v19): Enable PDM Digital Microphone Array (&pdm + &pdm_mic_array)
+ * Strictly single-variable delta on top of v18-hdmi-audio:
+ *  - &pdm (fe440000.pdm) -> status = "okay";
+ *  - &pdm_mic_array (rockchip,pdm-mic-array) -> status = "okay";
+ */
+
+#include "rk3568-ecloudbook-air-24rtw-v18-hdmi-audio.dts"
+
+&pdm {
+	status = "okay";
+};
+
+&pdm_mic_array {
+	status = "okay";
+};

@@ -1,0 +1,1505 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: CloudBook Air Linux Port <port@cloudbookair.local>
+Date: Sun, 15 Nov 2026 10:52:00 +0800
+Subject: [PATCH] power: supply: add Southchip SC2021 and TI BQ25700/BQ25703A drivers
+
+Add USB Type-C PD controller (Southchip SC2021) and buck-boost battery
+charger (TI BQ25700/BQ25703A) drivers for CloudBook Air (RK3568B2),
+including PD VBUS tiering (up to 3250 mA @ 20V), ICO enablement,
+watchdog disable, continuous ADC telemetry, and SBS battery coordination.
+---
+diff -ruN a/drivers/power/supply/bq25700_charger.c b/drivers/power/supply/bq25700_charger.c
+--- a/drivers/power/supply/bq25700_charger.c	1970-01-01 08:00:00.000000000 +0800
++++ b/drivers/power/supply/bq25700_charger.c	2026-11-15 10:51:50.238772366 +0800
+@@ -0,0 +1,1016 @@
++// SPDX-License-Identifier: GPL-2.0-only
++/*
++ * TI BQ25700 / BQ25703 / BQ25703A Buck-Boost Battery Charger driver
++ *
++ * Copyright (C) 2026 CloudBook Air Linux Port
++ */
++
++#include <linux/bitfield.h>
++#include <linux/bits.h>
++#include <linux/delay.h>
++#include <linux/i2c.h>
++#include <linux/interrupt.h>
++#include <linux/jiffies.h>
++#include <linux/kernel.h>
++#include <linux/module.h>
++#include <linux/mod_devicetable.h>
++#include <linux/mutex.h>
++#include <linux/of.h>
++#include <linux/pm.h>
++#include <linux/power_supply.h>
++#include <linux/property.h>
++#include <linux/regmap.h>
++#include <linux/slab.h>
++#include <linux/workqueue.h>
++
++#define BQ25703_REG_CHARGE_OPTION_0	0x00
++#define BQ25703_OPT0_EN_LWPWR		BIT(15)
++#define BQ25703_OPT0_WDTMR_ADJ_MASK	GENMASK(14, 13)
++#define BQ25703_OPT0_CHRG_INHIBIT	BIT(0)
++
++#define BQ25703_REG_CHARGE_CURRENT	0x02
++#define BQ25703_ICHG_MASK		GENMASK(12, 6)
++#define BQ25703_ICHG_STEP_UA		64000
++#define BQ25703_ICHG_MAX_UA		8128000
++
++#define BQ25703_REG_MAX_CHARGE_VOLT	0x04
++#define BQ25703_VCHG_MASK		GENMASK(14, 4)
++#define BQ25703_VCHG_STEP_UV		16000
++#define BQ25703_VCHG_MAX_UV		19200000
++
++#define BQ25703_REG_INPUT_VOLTAGE	0x0a
++#define BQ25703_VINDPM_MASK		GENMASK(13, 6)
++#define BQ25703_VINDPM_BASE_UV		3200000
++#define BQ25703_VINDPM_STEP_UV		64000
++#define BQ25703_VINDPM_MAX_UV		19520000
++
++#define BQ25703_REG_MIN_SYS_VOLTAGE	0x0c
++#define BQ25703_VSYS_MIN_MASK		GENMASK(13, 8)
++#define BQ25703_VSYS_MIN_BASE_UV	1024000
++#define BQ25703_VSYS_MIN_STEP_UV	256000
++
++#define BQ25703_REG_IIN_HOST		0x0e
++#define BQ25703_IIN_MASK		GENMASK(14, 8)
++#define BQ25703_IIN_STEP_UA		50000
++#define BQ25703_IIN_MAX_UA		6350000
++
++#define BQ25703_REG_CHARGER_STATUS	0x20
++#define BQ25703_STAT_AC_STAT		BIT(15)
++#define BQ25703_STAT_ICO_DONE		BIT(14)
++#define BQ25703_STAT_IN_VINDPM		BIT(10)
++#define BQ25703_STAT_IN_IINDPM		BIT(9)
++#define BQ25703_STAT_IN_FCHRG		BIT(6)
++#define BQ25703_STAT_IN_PCHRG		BIT(5)
++#define BQ25703_STAT_SYSOVP		BIT(4)
++#define BQ25703_STAT_SYSSHORT		BIT(3)
++
++#define BQ25703_REG_IIN_DPM		0x24
++#define BQ25703_REG_ADC_VBUS_PSYS	0x26
++#define BQ25703_ADC_VBUS_MASK		GENMASK(15, 8)
++#define BQ25703_REG_ADC_IBAT		0x28
++#define BQ25703_ADC_ICHG_MASK		GENMASK(14, 8)
++#define BQ25703_REG_ADC_IIN_CMPIN	0x2a
++#define BQ25703_ADC_IIN_MASK		GENMASK(15, 8)
++#define BQ25703_REG_ADC_VSYS_VBAT	0x2c
++#define BQ25703_ADC_VSYS_MASK		GENMASK(15, 8)
++#define BQ25703_ADC_VBAT_MASK		GENMASK(6, 0)
++
++#define BQ25703_REG_MFG_DEV_ID		0x2e
++#define BQ25703_MFG_ID_MASK		GENMASK(7, 0)
++#define BQ25703_DEV_ID_MASK		GENMASK(15, 8)
++#define BQ25703_MFG_ID_TI		0x01
++
++#define BQ25703_REG_CHARGE_OPTION_3	0x34
++#define BQ25703_OPT3_EN_OTG		BIT(12)
++#define BQ25703_OPT3_EN_ICO_MODE	BIT(11)
++
++#define BQ25703_REG_ADC_OPTION		0x3a
++#define BQ25703_ADC_ALL_CONT_FS		0xe0ff
++
++#define BQ25703_DEF_IIN_USB_UA		500000
++#define BQ25703_DEF_IIN_MAX_UA		3250000
++#define BQ25703_DEF_ICHG_UA		3000000
++#define BQ25703_DEF_VCHG_UV		8700000
++#define BQ25703_DEF_VSYS_MIN_UV		7168000
++#define BQ25703_DEF_VINDPM_OFFLINE_UV	4736000
++
++#define BQ25703_PD_WAIT_RETRIES		12
++#define BQ25703_PD_POLL_MS		300
++#define BQ25703_MON_ONLINE_MS		6000
++#define BQ25703_MON_OFFLINE_MS		20000
++
++struct bq25700_device {
++	struct device *dev;
++	struct regmap *regmap;
++	struct power_supply *charger;
++	struct power_supply *bat_psy;
++	struct power_supply *ext_psy;
++	struct delayed_work charger_work;
++	struct delayed_work monitor_work;
++	struct mutex lock;
++
++	u32 dt_iin_max_ua;
++	u32 dt_ichg_max_ua;
++	u32 dt_vchg_max_uv;
++	u32 dt_vsys_min_uv;
++
++	int user_iin_ua;
++	int user_ichg_ua;
++	bool user_inhibit;
++
++	unsigned int pd_retries;
++	bool last_online;
++	int last_status;
++	u32 last_iin_ua;
++	u32 last_ichg_ua;
++	bool state_valid;
++};
++
++static const struct regmap_config bq25700_regmap_config = {
++	.reg_bits = 8,
++	.val_bits = 16,
++	.reg_stride = 2,
++	.max_register = BQ25703_REG_ADC_OPTION,
++	.val_format_endian = REGMAP_ENDIAN_LITTLE,
++	.cache_type = REGCACHE_NONE,
++};
++
++static u32 bq25700_step_to_idx(u32 val, u32 min_val, u32 max_val, u32 step)
++{
++	val = clamp(val, min_val, max_val);
++	return (val - min_val) / step;
++}
++
++static int bq25700_set_iin_host_ua(struct bq25700_device *bq, u32 iin_ua)
++{
++	u32 idx = bq25700_step_to_idx(iin_ua, 0, BQ25703_IIN_MAX_UA,
++				      BQ25703_IIN_STEP_UA);
++
++	return regmap_update_bits(bq->regmap, BQ25703_REG_IIN_HOST,
++				  BQ25703_IIN_MASK,
++				  FIELD_PREP(BQ25703_IIN_MASK, idx));
++}
++
++static int bq25700_get_iin_host_ua(struct bq25700_device *bq, u32 *iin_ua)
++{
++	unsigned int raw;
++	int ret;
++
++	ret = regmap_read(bq->regmap, BQ25703_REG_IIN_HOST, &raw);
++	if (ret)
++		return ret;
++
++	*iin_ua = FIELD_GET(BQ25703_IIN_MASK, raw) * BQ25703_IIN_STEP_UA;
++	return 0;
++}
++
++static int bq25700_set_vindpm_uv(struct bq25700_device *bq, u32 vindpm_uv)
++{
++	u32 idx = bq25700_step_to_idx(vindpm_uv, BQ25703_VINDPM_BASE_UV,
++				      BQ25703_VINDPM_MAX_UV,
++				      BQ25703_VINDPM_STEP_UV);
++
++	return regmap_update_bits(bq->regmap, BQ25703_REG_INPUT_VOLTAGE,
++				  BQ25703_VINDPM_MASK,
++				  FIELD_PREP(BQ25703_VINDPM_MASK, idx));
++}
++
++static int bq25700_get_vindpm_uv(struct bq25700_device *bq, u32 *vindpm_uv)
++{
++	unsigned int raw;
++	int ret;
++
++	ret = regmap_read(bq->regmap, BQ25703_REG_INPUT_VOLTAGE, &raw);
++	if (ret)
++		return ret;
++
++	*vindpm_uv = BQ25703_VINDPM_BASE_UV +
++		     FIELD_GET(BQ25703_VINDPM_MASK, raw) * BQ25703_VINDPM_STEP_UV;
++	return 0;
++}
++
++static int bq25700_set_ichg_ua(struct bq25700_device *bq, u32 ichg_ua)
++{
++	u32 idx = bq25700_step_to_idx(ichg_ua, 0, BQ25703_ICHG_MAX_UA,
++				      BQ25703_ICHG_STEP_UA);
++
++	return regmap_update_bits(bq->regmap, BQ25703_REG_CHARGE_CURRENT,
++				  BQ25703_ICHG_MASK,
++				  FIELD_PREP(BQ25703_ICHG_MASK, idx));
++}
++
++static int bq25700_get_ichg_ua(struct bq25700_device *bq, u32 *ichg_ua)
++{
++	unsigned int raw;
++	int ret;
++
++	ret = regmap_read(bq->regmap, BQ25703_REG_CHARGE_CURRENT, &raw);
++	if (ret)
++		return ret;
++
++	*ichg_ua = FIELD_GET(BQ25703_ICHG_MASK, raw) * BQ25703_ICHG_STEP_UA;
++	return 0;
++}
++
++static int bq25700_set_vchg_uv(struct bq25700_device *bq, u32 vchg_uv)
++{
++	u32 idx = bq25700_step_to_idx(vchg_uv, 0, BQ25703_VCHG_MAX_UV,
++				      BQ25703_VCHG_STEP_UV);
++
++	return regmap_update_bits(bq->regmap, BQ25703_REG_MAX_CHARGE_VOLT,
++				  BQ25703_VCHG_MASK,
++				  FIELD_PREP(BQ25703_VCHG_MASK, idx));
++}
++
++static int bq25700_get_vchg_uv(struct bq25700_device *bq, u32 *vchg_uv)
++{
++	unsigned int raw;
++	int ret;
++
++	ret = regmap_read(bq->regmap, BQ25703_REG_MAX_CHARGE_VOLT, &raw);
++	if (ret)
++		return ret;
++
++	*vchg_uv = FIELD_GET(BQ25703_VCHG_MASK, raw) * BQ25703_VCHG_STEP_UV;
++	return 0;
++}
++
++static int bq25700_get_adc_vbus_uv(struct bq25700_device *bq, u32 *vbus_uv)
++{
++	unsigned int raw;
++	u32 code;
++	int ret;
++
++	ret = regmap_read(bq->regmap, BQ25703_REG_ADC_VBUS_PSYS, &raw);
++	if (ret)
++		return ret;
++
++	code = FIELD_GET(BQ25703_ADC_VBUS_MASK, raw);
++	*vbus_uv = code ? (code * BQ25703_VINDPM_STEP_UV + BQ25703_VINDPM_BASE_UV) : 0;
++	return 0;
++}
++
++static int bq25700_get_adc_iin_ua(struct bq25700_device *bq, u32 *iin_ua)
++{
++	unsigned int raw;
++	int ret;
++
++	ret = regmap_read(bq->regmap, BQ25703_REG_ADC_IIN_CMPIN, &raw);
++	if (ret)
++		return ret;
++
++	*iin_ua = FIELD_GET(BQ25703_ADC_IIN_MASK, raw) * BQ25703_IIN_STEP_UA;
++	return 0;
++}
++
++static struct power_supply *bq25700_resolve_psy(struct bq25700_device *bq,
++					      struct power_supply **slot,
++					      const char *phandle_prop,
++					      const char *fallback_name)
++{
++	struct power_supply *psy;
++
++	if (*slot)
++		return *slot;
++
++	if (bq->dev->of_node && phandle_prop) {
++		psy = power_supply_get_by_phandle(bq->dev->of_node, phandle_prop);
++		if (!IS_ERR_OR_NULL(psy)) {
++			*slot = psy;
++			return psy;
++		}
++	}
++
++	if (fallback_name) {
++		psy = power_supply_get_by_name(fallback_name);
++		if (!IS_ERR_OR_NULL(psy)) {
++			*slot = psy;
++			return psy;
++		}
++	}
++
++	return NULL;
++}
++
++static struct power_supply *bq25700_resolve_battery_psy(struct bq25700_device *bq)
++{
++	return bq25700_resolve_psy(bq, &bq->bat_psy, "ti,battery-psy",
++				   "sbs-0-000b");
++}
++
++static struct power_supply *bq25700_resolve_ext_psy(struct bq25700_device *bq)
++{
++	return bq25700_resolve_psy(bq, &bq->ext_psy, "power-supplies",
++				   "sc2021-typec");
++}
++
++static void bq25700_clear_fault_latches(struct bq25700_device *bq,
++					unsigned int status)
++{
++	unsigned int clr = status & (BQ25703_STAT_SYSOVP | BQ25703_STAT_SYSSHORT);
++
++	if (clr)
++		regmap_update_bits(bq->regmap, BQ25703_REG_CHARGER_STATUS,
++				   clr, 0);
++}
++
++/**
++ * bq25700_apply_input_tier() - Program VINDPM and IIN_HOST from measured VBUS.
++ * @bq: Charger device instance (caller holds bq->lock).
++ * @vbus_uv: Measured VBUS voltage in microvolts.
++ */
++static int bq25700_apply_input_tier(struct bq25700_device *bq, u32 vbus_uv)
++{
++	u32 target_iin, target_vindpm;
++	int ret;
++
++	if (vbus_uv < 3201000) {
++		target_iin = 0;
++		target_vindpm = BQ25703_DEF_VINDPM_OFFLINE_UV;
++	} else if (vbus_uv < 6000000) {
++		target_iin = 2000000;
++		target_vindpm = vbus_uv - 250000;
++	} else if (vbus_uv < 16000000) {
++		target_iin = 2500000;
++		target_vindpm = vbus_uv - 500000;
++	} else {
++		target_iin = 3250000;
++		target_vindpm = vbus_uv - 750000;
++	}
++
++	target_iin = min(target_iin, bq->dt_iin_max_ua);
++	if (bq->user_iin_ua >= 0)
++		target_iin = min_t(u32, target_iin, bq->user_iin_ua);
++
++	ret = bq25700_set_vindpm_uv(bq, target_vindpm);
++	if (ret)
++		return ret;
++
++	return bq25700_set_iin_host_ua(bq, target_iin);
++}
++
++/**
++ * bq25700_sync_charge_control() - Reconcile AC state, SBS battery demand, and CHRG_INHIBIT.
++ * @bq: Charger device instance (caller holds bq->lock).
++ * @ac_online: True when AC_STAT indicates valid VBUS.
++ */
++static int bq25700_sync_charge_control(struct bq25700_device *bq, bool ac_online)
++{
++	struct power_supply *bat_psy = bq25700_resolve_battery_psy(bq);
++	union power_supply_propval val = {};
++	bool bat_full = false;
++	u32 ichg_ua = 0;
++	u32 vchg_uv = bq->dt_vchg_max_uv;
++	bool inhibit;
++	int ret;
++
++	if (!ac_online || bq->user_inhibit) {
++		ichg_ua = 0;
++		inhibit = true;
++	} else {
++		ichg_ua = bq->dt_ichg_max_ua;
++
++		if (bat_psy) {
++			if (!power_supply_get_property(bat_psy,
++						       POWER_SUPPLY_PROP_STATUS,
++						       &val) &&
++			    val.intval == POWER_SUPPLY_STATUS_FULL)
++				bat_full = true;
++
++			if (!power_supply_get_property(bat_psy,
++						       POWER_SUPPLY_PROP_CONSTANT_CHARGE_CURRENT_MAX,
++						       &val)) {
++				if (val.intval <= 0)
++					bat_full = true;
++				else
++					ichg_ua = min_t(u32, ichg_ua, val.intval);
++			}
++
++			if (!power_supply_get_property(bat_psy,
++						       POWER_SUPPLY_PROP_CONSTANT_CHARGE_VOLTAGE_MAX,
++						       &val) &&
++			    val.intval > 0)
++				vchg_uv = min_t(u32, vchg_uv, val.intval);
++		}
++
++		if (bq->user_ichg_ua >= 0)
++			ichg_ua = min_t(u32, ichg_ua, bq->user_ichg_ua);
++
++		inhibit = bat_full || (ichg_ua == 0);
++		if (inhibit)
++			ichg_ua = 0;
++	}
++
++	ret = bq25700_set_vchg_uv(bq, vchg_uv);
++	if (ret)
++		return ret;
++
++	ret = bq25700_set_ichg_ua(bq, ichg_ua);
++	if (ret)
++		return ret;
++
++	return regmap_update_bits(bq->regmap, BQ25703_REG_CHARGE_OPTION_0,
++				  BQ25703_OPT0_CHRG_INHIBIT,
++				  inhibit ? BQ25703_OPT0_CHRG_INHIBIT : 0);
++}
++
++static int bq25700_compute_status(struct bq25700_device *bq,
++				  unsigned int chg_stat, bool ac_online)
++{
++	struct power_supply *bat_psy = bq25700_resolve_battery_psy(bq);
++	union power_supply_propval val = {};
++	u32 ichg_ua = 0;
++	unsigned int opt0 = 0;
++
++	if (!ac_online)
++		return POWER_SUPPLY_STATUS_DISCHARGING;
++
++	if (bat_psy &&
++	    !power_supply_get_property(bat_psy, POWER_SUPPLY_PROP_STATUS, &val) &&
++	    val.intval == POWER_SUPPLY_STATUS_FULL)
++		return POWER_SUPPLY_STATUS_FULL;
++
++	if (chg_stat & (BQ25703_STAT_IN_FCHRG | BQ25703_STAT_IN_PCHRG))
++		return POWER_SUPPLY_STATUS_CHARGING;
++
++	regmap_read(bq->regmap, BQ25703_REG_CHARGE_OPTION_0, &opt0);
++	bq25700_get_ichg_ua(bq, &ichg_ua);
++
++	if (!(opt0 & BQ25703_OPT0_CHRG_INHIBIT) && ichg_ua > 0)
++		return POWER_SUPPLY_STATUS_CHARGING;
++
++	return POWER_SUPPLY_STATUS_NOT_CHARGING;
++}
++
++static void bq25700_reconfigure_charger(struct bq25700_device *bq,
++					bool from_evt)
++{
++	struct power_supply *ext_psy;
++	unsigned int chg_stat = 0;
++	u32 vbus_uv = 0, iin_ua = 0, ichg_ua = 0, ext_vmax = 0;
++	bool ac_online;
++	int status, ret;
++	bool changed = false;
++
++	mutex_lock(&bq->lock);
++
++	ret = regmap_read(bq->regmap, BQ25703_REG_CHARGER_STATUS, &chg_stat);
++	if (ret) {
++		mutex_unlock(&bq->lock);
++		dev_err_ratelimited(bq->dev, "failed to read status: %d\n", ret);
++		return;
++	}
++
++	bq25700_clear_fault_latches(bq, chg_stat);
++	ac_online = !!(chg_stat & BQ25703_STAT_AC_STAT);
++
++	if (!ac_online) {
++		bq->pd_retries = 0;
++		bq25700_set_vindpm_uv(bq, BQ25703_DEF_VINDPM_OFFLINE_UV);
++		bq25700_set_iin_host_ua(bq, BQ25703_DEF_IIN_USB_UA);
++	} else {
++		bq25700_get_adc_vbus_uv(bq, &vbus_uv);
++		if (vbus_uv < 6000000) {
++			ext_psy = bq25700_resolve_ext_psy(bq);
++			if (ext_psy) {
++				union power_supply_propval pv = {};
++
++				if (!power_supply_get_property(ext_psy,
++							       POWER_SUPPLY_PROP_VOLTAGE_MAX,
++							       &pv) &&
++				    pv.intval > vbus_uv)
++					ext_vmax = pv.intval;
++			}
++			/* Wait for SC2021 PD contract negotiation on hotplug before capping. */
++			if ((from_evt || ext_vmax >= 6000000) &&
++			    bq->pd_retries < BQ25703_PD_WAIT_RETRIES) {
++				bq->pd_retries++;
++				schedule_delayed_work(&bq->charger_work,
++						      msecs_to_jiffies(BQ25703_PD_POLL_MS));
++			}
++		} else {
++			bq->pd_retries = 0;
++		}
++
++		regmap_update_bits(bq->regmap, BQ25703_REG_CHARGE_OPTION_3,
++				   BQ25703_OPT3_EN_ICO_MODE,
++				   BQ25703_OPT3_EN_ICO_MODE);
++		bq25700_apply_input_tier(bq, max(vbus_uv, ext_vmax));
++	}
++
++	bq25700_sync_charge_control(bq, ac_online);
++	bq25700_get_iin_host_ua(bq, &iin_ua);
++	bq25700_get_ichg_ua(bq, &ichg_ua);
++	status = bq25700_compute_status(bq, chg_stat, ac_online);
++
++	if (!bq->state_valid || bq->last_online != ac_online ||
++	    bq->last_status != status || bq->last_iin_ua != iin_ua ||
++	    bq->last_ichg_ua != ichg_ua) {
++		bq->last_online = ac_online;
++		bq->last_status = status;
++		bq->last_iin_ua = iin_ua;
++		bq->last_ichg_ua = ichg_ua;
++		bq->state_valid = true;
++		changed = true;
++	}
++
++	mutex_unlock(&bq->lock);
++
++	if (changed) {
++		dev_info(bq->dev,
++			 "ac=%u vbus=%umV iin_limit=%umA ichg=%umA status=%d\n",
++			 ac_online, vbus_uv / 1000, iin_ua / 1000,
++			 ichg_ua / 1000, status);
++		if (bq->charger)
++			power_supply_changed(bq->charger);
++	}
++}
++
++static void bq25700_charger_worker(struct work_struct *work)
++{
++	struct bq25700_device *bq =
++		container_of(work, struct bq25700_device, charger_work.work);
++
++	bq25700_reconfigure_charger(bq, true);
++}
++
++static void bq25700_monitor_worker(struct work_struct *work)
++{
++	struct bq25700_device *bq =
++		container_of(work, struct bq25700_device, monitor_work.work);
++	unsigned int next_ms;
++
++	bq25700_reconfigure_charger(bq, false);
++
++	mutex_lock(&bq->lock);
++	next_ms = bq->last_online ? BQ25703_MON_ONLINE_MS : BQ25703_MON_OFFLINE_MS;
++	mutex_unlock(&bq->lock);
++
++	schedule_delayed_work(&bq->monitor_work, msecs_to_jiffies(next_ms));
++}
++
++static int bq25700_hw_init(struct bq25700_device *bq)
++{
++	u32 min_sys_idx;
++	int ret;
++
++	/* Disable watchdog timer and keep converter/ADC active. */
++	ret = regmap_update_bits(bq->regmap, BQ25703_REG_CHARGE_OPTION_0,
++				 BQ25703_OPT0_EN_LWPWR |
++				 BQ25703_OPT0_WDTMR_ADJ_MASK, 0);
++	if (ret)
++		return ret;
++
++	/* Enable continuous full-scale ADC conversions across all channels. */
++	ret = regmap_write(bq->regmap, BQ25703_REG_ADC_OPTION,
++			   BQ25703_ADC_ALL_CONT_FS);
++	if (ret)
++		return ret;
++
++	min_sys_idx = bq25700_step_to_idx(bq->dt_vsys_min_uv,
++					  BQ25703_VSYS_MIN_BASE_UV, 16182000,
++					  BQ25703_VSYS_MIN_STEP_UV);
++	ret = regmap_update_bits(bq->regmap, BQ25703_REG_MIN_SYS_VOLTAGE,
++				 BQ25703_VSYS_MIN_MASK,
++				 FIELD_PREP(BQ25703_VSYS_MIN_MASK, min_sys_idx));
++	if (ret)
++		return ret;
++
++	ret = bq25700_set_vchg_uv(bq, bq->dt_vchg_max_uv);
++	if (ret)
++		return ret;
++
++	/* Enable Input Current Optimizer; never force OTG output from charger probe. */
++	ret = regmap_update_bits(bq->regmap, BQ25703_REG_CHARGE_OPTION_3,
++				 BQ25703_OPT3_EN_OTG | BQ25703_OPT3_EN_ICO_MODE,
++				 BQ25703_OPT3_EN_ICO_MODE);
++	if (ret)
++		return ret;
++
++	/* Give continuous ADC one conversion slot if just powered up. */
++	msleep(25);
++	return 0;
++}
++
++static irqreturn_t bq25700_irq_handler(int irq, void *data)
++{
++	struct bq25700_device *bq = data;
++
++	mutex_lock(&bq->lock);
++	bq->pd_retries = 0;
++	mutex_unlock(&bq->lock);
++
++	mod_delayed_work(system_wq, &bq->charger_work, msecs_to_jiffies(20));
++	return IRQ_HANDLED;
++}
++
++static void bq25700_external_power_changed(struct power_supply *psy)
++{
++	struct bq25700_device *bq = power_supply_get_drvdata(psy);
++
++	mutex_lock(&bq->lock);
++	bq->pd_retries = 0;
++	mutex_unlock(&bq->lock);
++
++	mod_delayed_work(system_wq, &bq->charger_work, msecs_to_jiffies(20));
++}
++
++static enum power_supply_property bq25700_psy_props[] = {
++	POWER_SUPPLY_PROP_STATUS,
++	POWER_SUPPLY_PROP_ONLINE,
++	POWER_SUPPLY_PROP_HEALTH,
++	POWER_SUPPLY_PROP_VOLTAGE_NOW,
++	POWER_SUPPLY_PROP_CURRENT_NOW,
++	POWER_SUPPLY_PROP_INPUT_CURRENT_LIMIT,
++	POWER_SUPPLY_PROP_INPUT_VOLTAGE_LIMIT,
++	POWER_SUPPLY_PROP_CONSTANT_CHARGE_CURRENT,
++	POWER_SUPPLY_PROP_CONSTANT_CHARGE_CURRENT_MAX,
++	POWER_SUPPLY_PROP_CONSTANT_CHARGE_VOLTAGE,
++	POWER_SUPPLY_PROP_CONSTANT_CHARGE_VOLTAGE_MAX,
++	POWER_SUPPLY_PROP_CHARGE_BEHAVIOUR,
++	POWER_SUPPLY_PROP_MODEL_NAME,
++	POWER_SUPPLY_PROP_MANUFACTURER,
++};
++
++static int bq25700_psy_get_property(struct power_supply *psy,
++				    enum power_supply_property psp,
++				    union power_supply_propval *val)
++{
++	struct bq25700_device *bq = power_supply_get_drvdata(psy);
++	unsigned int st = 0;
++	u32 uv = 0, ua = 0;
++	bool ac_online;
++	int ret;
++
++	switch (psp) {
++	case POWER_SUPPLY_PROP_STATUS:
++		ret = regmap_read(bq->regmap, BQ25703_REG_CHARGER_STATUS, &st);
++		if (ret)
++			return ret;
++		ac_online = !!(st & BQ25703_STAT_AC_STAT);
++		val->intval = bq25700_compute_status(bq, st, ac_online);
++		return 0;
++
++	case POWER_SUPPLY_PROP_ONLINE:
++		ret = regmap_read(bq->regmap, BQ25703_REG_CHARGER_STATUS, &st);
++		if (ret)
++			return ret;
++		val->intval = !!(st & BQ25703_STAT_AC_STAT);
++		return 0;
++
++	case POWER_SUPPLY_PROP_HEALTH:
++		ret = regmap_read(bq->regmap, BQ25703_REG_CHARGER_STATUS, &st);
++		if (ret)
++			return ret;
++		val->intval = (st & BQ25703_STAT_SYSOVP) ?
++			      POWER_SUPPLY_HEALTH_OVERVOLTAGE :
++			      POWER_SUPPLY_HEALTH_GOOD;
++		return 0;
++
++	case POWER_SUPPLY_PROP_VOLTAGE_NOW:
++		ret = bq25700_get_adc_vbus_uv(bq, &uv);
++		if (ret)
++			return ret;
++		val->intval = uv;
++		return 0;
++
++	case POWER_SUPPLY_PROP_CURRENT_NOW:
++		ret = bq25700_get_adc_iin_ua(bq, &ua);
++		if (ret)
++			return ret;
++		val->intval = ua;
++		return 0;
++
++	case POWER_SUPPLY_PROP_INPUT_CURRENT_LIMIT:
++		ret = bq25700_get_iin_host_ua(bq, &ua);
++		if (ret)
++			return ret;
++		val->intval = ua;
++		return 0;
++
++	case POWER_SUPPLY_PROP_INPUT_VOLTAGE_LIMIT:
++		ret = bq25700_get_vindpm_uv(bq, &uv);
++		if (ret)
++			return ret;
++		val->intval = uv;
++		return 0;
++
++	case POWER_SUPPLY_PROP_CONSTANT_CHARGE_CURRENT:
++		ret = bq25700_get_ichg_ua(bq, &ua);
++		if (ret)
++			return ret;
++		val->intval = ua;
++		return 0;
++
++	case POWER_SUPPLY_PROP_CONSTANT_CHARGE_CURRENT_MAX:
++		val->intval = bq->dt_ichg_max_ua;
++		return 0;
++
++	case POWER_SUPPLY_PROP_CONSTANT_CHARGE_VOLTAGE:
++		ret = bq25700_get_vchg_uv(bq, &uv);
++		if (ret)
++			return ret;
++		val->intval = uv;
++		return 0;
++
++	case POWER_SUPPLY_PROP_CONSTANT_CHARGE_VOLTAGE_MAX:
++		val->intval = bq->dt_vchg_max_uv;
++		return 0;
++
++	case POWER_SUPPLY_PROP_CHARGE_BEHAVIOUR:
++		mutex_lock(&bq->lock);
++		val->intval = bq->user_inhibit ?
++			      POWER_SUPPLY_CHARGE_BEHAVIOUR_INHIBIT_CHARGE :
++			      POWER_SUPPLY_CHARGE_BEHAVIOUR_AUTO;
++		mutex_unlock(&bq->lock);
++		return 0;
++
++	case POWER_SUPPLY_PROP_MODEL_NAME:
++		val->strval = "BQ25703A";
++		return 0;
++
++	case POWER_SUPPLY_PROP_MANUFACTURER:
++		val->strval = "Texas Instruments";
++		return 0;
++
++	default:
++		return -EINVAL;
++	}
++}
++
++static int bq25700_psy_set_property(struct power_supply *psy,
++				    enum power_supply_property psp,
++				    const union power_supply_propval *val)
++{
++	struct bq25700_device *bq = power_supply_get_drvdata(psy);
++
++	mutex_lock(&bq->lock);
++	switch (psp) {
++	case POWER_SUPPLY_PROP_INPUT_CURRENT_LIMIT:
++		bq->user_iin_ua = clamp_t(int, val->intval, 0,
++					  bq->dt_iin_max_ua);
++		break;
++
++	case POWER_SUPPLY_PROP_CONSTANT_CHARGE_CURRENT:
++		bq->user_ichg_ua = clamp_t(int, val->intval, 0,
++					   bq->dt_ichg_max_ua);
++		break;
++
++	case POWER_SUPPLY_PROP_CHARGE_BEHAVIOUR:
++		if (val->intval == POWER_SUPPLY_CHARGE_BEHAVIOUR_AUTO)
++			bq->user_inhibit = false;
++		else if (val->intval == POWER_SUPPLY_CHARGE_BEHAVIOUR_INHIBIT_CHARGE)
++			bq->user_inhibit = true;
++		else {
++			mutex_unlock(&bq->lock);
++			return -EINVAL;
++		}
++		break;
++
++	default:
++		mutex_unlock(&bq->lock);
++		return -EINVAL;
++	}
++	mutex_unlock(&bq->lock);
++
++	mod_delayed_work(system_wq, &bq->charger_work, 0);
++	return 0;
++}
++
++static int bq25700_psy_property_is_writeable(struct power_supply *psy,
++					     enum power_supply_property psp)
++{
++	switch (psp) {
++	case POWER_SUPPLY_PROP_INPUT_CURRENT_LIMIT:
++	case POWER_SUPPLY_PROP_CONSTANT_CHARGE_CURRENT:
++	case POWER_SUPPLY_PROP_CHARGE_BEHAVIOUR:
++		return 1;
++	default:
++		return 0;
++	}
++}
++
++static const struct power_supply_desc bq25700_psy_desc = {
++	.name = "bq25703-charger",
++	.type = POWER_SUPPLY_TYPE_MAINS,
++	.charge_behaviours = BIT(POWER_SUPPLY_CHARGE_BEHAVIOUR_AUTO) |
++			     BIT(POWER_SUPPLY_CHARGE_BEHAVIOUR_INHIBIT_CHARGE),
++	.properties = bq25700_psy_props,
++	.num_properties = ARRAY_SIZE(bq25700_psy_props),
++	.get_property = bq25700_psy_get_property,
++	.set_property = bq25700_psy_set_property,
++	.property_is_writeable = bq25700_psy_property_is_writeable,
++	.external_power_changed = bq25700_external_power_changed,
++};
++
++static void bq25700_parse_dt_defaults(struct bq25700_device *bq)
++{
++	struct device *dev = bq->dev;
++	u32 val;
++
++	bq->dt_iin_max_ua = BQ25703_DEF_IIN_MAX_UA;
++	if (!device_property_read_u32(dev, "input-current-limit-microamp", &val))
++		bq->dt_iin_max_ua = clamp_t(u32, val, 0, BQ25703_IIN_MAX_UA);
++	else if (!device_property_read_u32(dev, "ti,input-current", &val))
++		bq->dt_iin_max_ua = clamp_t(u32, val, 0, BQ25703_IIN_MAX_UA);
++
++	bq->dt_ichg_max_ua = BQ25703_DEF_ICHG_UA;
++	bq->dt_vchg_max_uv = BQ25703_DEF_VCHG_UV;
++	bq->dt_vsys_min_uv = BQ25703_DEF_VSYS_MIN_UV;
++
++	if (!device_property_read_u32(dev, "ti,minimum-sys-voltage", &val))
++		bq->dt_vsys_min_uv = val;
++	if (!device_property_read_u32(dev, "ti,max-charge-voltage", &val))
++		bq->dt_vchg_max_uv = val;
++	if (!device_property_read_u32(dev, "ti,charge-current", &val))
++		bq->dt_ichg_max_ua = val;
++}
++
++static void bq25700_parse_battery_info(struct bq25700_device *bq)
++{
++	struct power_supply_battery_info *bat_info;
++	int ret;
++
++	ret = power_supply_get_battery_info(bq->charger, &bat_info);
++	if (!ret && bat_info) {
++		if (bat_info->constant_charge_current_max_ua > 0)
++			bq->dt_ichg_max_ua =
++				bat_info->constant_charge_current_max_ua;
++		if (bat_info->constant_charge_voltage_max_uv > 0)
++			bq->dt_vchg_max_uv =
++				bat_info->constant_charge_voltage_max_uv;
++		if (bat_info->voltage_min_design_uv > 0)
++			bq->dt_vsys_min_uv = bat_info->voltage_min_design_uv;
++		power_supply_put_battery_info(bq->charger, bat_info);
++	}
++}
++
++static int bq25700_probe(struct i2c_client *client)
++{
++	struct power_supply_config psy_cfg = {};
++	struct device *dev = &client->dev;
++	struct bq25700_device *bq;
++	unsigned int ids = 0;
++	u8 mfg_id, dev_id;
++	int ret;
++
++	bq = devm_kzalloc(dev, sizeof(*bq), GFP_KERNEL);
++	if (!bq)
++		return -ENOMEM;
++
++	bq->dev = dev;
++	bq->user_iin_ua = -1;
++	bq->user_ichg_ua = -1;
++	mutex_init(&bq->lock);
++	INIT_DELAYED_WORK(&bq->charger_work, bq25700_charger_worker);
++	INIT_DELAYED_WORK(&bq->monitor_work, bq25700_monitor_worker);
++	i2c_set_clientdata(client, bq);
++
++	bq->regmap = devm_regmap_init_i2c(client, &bq25700_regmap_config);
++	if (IS_ERR(bq->regmap))
++		return dev_err_probe(dev, PTR_ERR(bq->regmap),
++				     "failed to init regmap\n");
++
++	ret = regmap_read(bq->regmap, BQ25703_REG_MFG_DEV_ID, &ids);
++	if (ret)
++		return dev_err_probe(dev, ret, "failed to read chip ID\n");
++
++	mfg_id = FIELD_GET(BQ25703_MFG_ID_MASK, ids);
++	dev_id = FIELD_GET(BQ25703_DEV_ID_MASK, ids);
++	if (mfg_id != BQ25703_MFG_ID_TI)
++		dev_warn(dev, "unexpected mfg_id 0x%02x (dev_id 0x%02x)\n",
++			 mfg_id, dev_id);
++
++	bq25700_parse_dt_defaults(bq);
++
++	psy_cfg.of_node = dev->of_node;
++	psy_cfg.drv_data = bq;
++	bq->charger = devm_power_supply_register(dev, &bq25700_psy_desc,
++						 &psy_cfg);
++	if (IS_ERR(bq->charger))
++		return dev_err_probe(dev, PTR_ERR(bq->charger),
++				     "failed to register power supply\n");
++
++	bq25700_parse_battery_info(bq);
++
++	ret = bq25700_hw_init(bq);
++	if (ret)
++		return dev_err_probe(dev, ret, "failed hardware initialization\n");
++
++	if (client->irq > 0) {
++		ret = devm_request_threaded_irq(dev, client->irq, NULL,
++						bq25700_irq_handler,
++						IRQF_TRIGGER_RISING |
++						IRQF_TRIGGER_FALLING |
++						IRQF_ONESHOT,
++						"bq25703-charger", bq);
++		if (ret)
++			return dev_err_probe(dev, ret,
++					     "failed to request irq %d\n",
++					     client->irq);
++	}
++
++	/* Synchronize VBUS/IIN limits before probe returns so early high-load gets full PD. */
++	bq25700_reconfigure_charger(bq, true);
++	schedule_delayed_work(&bq->monitor_work,
++			      msecs_to_jiffies(BQ25703_MON_ONLINE_MS));
++
++	dev_info(dev,
++		 "TI BQ25703A probed (mfg=0x%02x dev=0x%02x iin_max=%umA ichg_max=%umA vchg=%umV)\n",
++		 mfg_id, dev_id, bq->dt_iin_max_ua / 1000,
++		 bq->dt_ichg_max_ua / 1000, bq->dt_vchg_max_uv / 1000);
++	return 0;
++}
++
++static void bq25700_remove(struct i2c_client *client)
++{
++	struct bq25700_device *bq = i2c_get_clientdata(client);
++
++	cancel_delayed_work_sync(&bq->charger_work);
++	cancel_delayed_work_sync(&bq->monitor_work);
++	if (bq->bat_psy)
++		power_supply_put(bq->bat_psy);
++	if (bq->ext_psy)
++		power_supply_put(bq->ext_psy);
++}
++
++static void bq25700_shutdown(struct i2c_client *client)
++{
++	struct bq25700_device *bq = i2c_get_clientdata(client);
++
++	cancel_delayed_work_sync(&bq->charger_work);
++	cancel_delayed_work_sync(&bq->monitor_work);
++}
++
++static int bq25700_suspend(struct device *dev)
++{
++	struct bq25700_device *bq = dev_get_drvdata(dev);
++	unsigned int st = 0;
++
++	cancel_delayed_work_sync(&bq->charger_work);
++	cancel_delayed_work_sync(&bq->monitor_work);
++
++	if (!regmap_read(bq->regmap, BQ25703_REG_CHARGER_STATUS, &st) &&
++	    !(st & BQ25703_STAT_AC_STAT)) {
++		regmap_write(bq->regmap, BQ25703_REG_ADC_OPTION, 0);
++		regmap_update_bits(bq->regmap, BQ25703_REG_CHARGE_OPTION_0,
++				   BQ25703_OPT0_EN_LWPWR,
++				   BQ25703_OPT0_EN_LWPWR);
++	}
++	return 0;
++}
++
++static int bq25700_resume(struct device *dev)
++{
++	struct bq25700_device *bq = dev_get_drvdata(dev);
++	int ret;
++
++	ret = bq25700_hw_init(bq);
++	if (ret)
++		dev_warn(dev, "resume hw_init failed: %d\n", ret);
++
++	mutex_lock(&bq->lock);
++	bq->pd_retries = 0;
++	bq->state_valid = false;
++	mutex_unlock(&bq->lock);
++
++	schedule_delayed_work(&bq->charger_work, 0);
++	schedule_delayed_work(&bq->monitor_work,
++			      msecs_to_jiffies(BQ25703_MON_ONLINE_MS));
++	return 0;
++}
++
++static DEFINE_SIMPLE_DEV_PM_OPS(bq25700_pm_ops, bq25700_suspend, bq25700_resume);
++
++static const struct of_device_id bq25700_of_match[] = {
++	{ .compatible = "ti,bq25703a" },
++	{ .compatible = "ti,bq25703" },
++	{ .compatible = "ti,bq25700" },
++	{}
++};
++MODULE_DEVICE_TABLE(of, bq25700_of_match);
++
++static const struct i2c_device_id bq25700_i2c_id[] = {
++	{ "bq25703a", 0 },
++	{ "bq25703", 0 },
++	{ "bq25700", 0 },
++	{}
++};
++MODULE_DEVICE_TABLE(i2c, bq25700_i2c_id);
++
++static struct i2c_driver bq25700_driver = {
++	.driver = {
++		.name = "bq25700-charger",
++		.of_match_table = bq25700_of_match,
++		.pm = pm_sleep_ptr(&bq25700_pm_ops),
++	},
++	.probe = bq25700_probe,
++	.remove = bq25700_remove,
++	.shutdown = bq25700_shutdown,
++	.id_table = bq25700_i2c_id,
++};
++module_i2c_driver(bq25700_driver);
++
++MODULE_AUTHOR("CloudBook Air Linux Port");
++MODULE_DESCRIPTION("TI BQ25700/BQ25703/BQ25703A buck-boost charger driver");
++MODULE_LICENSE("GPL");
+diff -ruN a/drivers/power/supply/Kconfig b/drivers/power/supply/Kconfig
+--- a/drivers/power/supply/Kconfig	2026-11-15 10:52:20.950966673 +0800
++++ b/drivers/power/supply/Kconfig	2026-11-15 10:51:21.450277996 +0800
+@@ -748,6 +748,22 @@
+ 	  charge management and system power path management devices for single
+ 	  cell Li-ion and Li-polymer batteries.
+ 
++config CHARGER_BQ25700
++	tristate "TI BQ25700/BQ25703A buck-boost battery charger driver"
++	depends on I2C
++	select REGMAP_I2C
++	help
++	  Say Y to enable support for the TI BQ25700, BQ25703 and BQ25703A
++	  buck-boost battery chargers with USB PD input power negotiation.
++
++config CHARGER_SC2021
++	tristate "Southchip SC2021 Type-C PD port controller driver"
++	depends on I2C
++	depends on GPIOLIB || COMPILE_TEST
++	select REGMAP_I2C
++	help
++	  Say Y to enable support for the Southchip SC2021 USB Type-C / PD
++	  and DPDM port controller used with companion battery chargers.
+ 
+ config CHARGER_RK817
+ 	tristate "Rockchip RK817 PMIC Battery Charger"
+diff -ruN a/drivers/power/supply/Makefile b/drivers/power/supply/Makefile
+--- a/drivers/power/supply/Makefile	2026-11-15 10:52:20.951046828 +0800
++++ b/drivers/power/supply/Makefile	2026-11-15 10:51:23.648292262 +0800
+@@ -96,6 +96,8 @@
+ obj-$(CONFIG_CHARGER_BQ25890)	+= bq25890_charger.o
+ obj-$(CONFIG_CHARGER_BQ25980)	+= bq25980_charger.o
+ obj-$(CONFIG_CHARGER_BQ256XX)	+= bq256xx_charger.o
++obj-$(CONFIG_CHARGER_BQ25700)	+= bq25700_charger.o
++obj-$(CONFIG_CHARGER_SC2021)	+= sc2021_charger.o
+ obj-$(CONFIG_CHARGER_RK817)	+= rk817_charger.o
+ obj-$(CONFIG_CHARGER_SMB347)	+= smb347-charger.o
+ obj-$(CONFIG_CHARGER_TPS65090)	+= tps65090-charger.o
+diff -ruN a/drivers/power/supply/sc2021_charger.c b/drivers/power/supply/sc2021_charger.c
+--- a/drivers/power/supply/sc2021_charger.c	1970-01-01 08:00:00.000000000 +0800
++++ b/drivers/power/supply/sc2021_charger.c	2026-11-15 10:49:50.159685505 +0800
+@@ -0,0 +1,433 @@
++// SPDX-License-Identifier: GPL-2.0-only
++/*
++ * Southchip SC2021 Type-C / USB PD / DPDM port controller driver
++ *
++ * Copyright (C) 2026 CloudBook Air Linux Port
++ */
++
++#include <linux/bitfield.h>
++#include <linux/bits.h>
++#include <linux/delay.h>
++#include <linux/gpio/consumer.h>
++#include <linux/i2c.h>
++#include <linux/interrupt.h>
++#include <linux/jiffies.h>
++#include <linux/kernel.h>
++#include <linux/module.h>
++#include <linux/mod_devicetable.h>
++#include <linux/mutex.h>
++#include <linux/pm.h>
++#include <linux/power_supply.h>
++#include <linux/regmap.h>
++#include <linux/regulator/consumer.h>
++#include <linux/slab.h>
++#include <linux/workqueue.h>
++
++#define SC2021_REG_TYPEC_STATE		0x10
++#define SC2021_TYPEC_ATTACHED_SNK	BIT(0)
++#define SC2021_TYPEC_ATTACHED_SRC	BIT(1)
++#define SC2021_TYPEC_POWER_GOOD		BIT(2)
++#define SC2021_TYPEC_ROLE_MASK		GENMASK(7, 6)
++
++#define SC2021_REG_DPDM_IN_STATE	0x11
++#define SC2021_DPDM_MCU_CTRL		BIT(6)
++#define SC2021_CHG_DET_READY		BIT(7)
++
++#define SC2021_REG_VBUS_EXT_MSB		0x12
++#define SC2021_REG_VBUS_EXT_LSB		0x13
++#define SC2021_REG_PD_IMAX		0x14
++#define SC2021_REG_PD_VMAX		0x15
++#define SC2021_REG_VBUS_ADC		0x16
++#define SC2021_REG_IBUS_ADC		0x17
++#define SC2021_REG_DPDM_VBUS_MSB	0x18
++#define SC2021_REG_DPDM_VBUS_LSB	0x19
++#define SC2021_REG_OTG_SUPPORT		0x1b
++#define SC2021_REG_FW_VERSION		0x1f
++
++#define SC2021_VBUS_STEP_UV		128000
++#define SC2021_IBUS_STEP_UA		32000
++#define SC2021_RETRY_DELAY_MS		600
++#define SC2021_MAX_DET_RETRIES		10
++
++struct sc2021_device {
++	struct device *dev;
++	struct regmap *regmap;
++	struct power_supply *psy;
++	struct gpio_desc *pdotg_gpio;
++	struct gpio_desc *dpdm_gpio;
++	struct delayed_work evt_work;
++	struct mutex lock;
++
++	char fw_ver[16];
++	u8 last_typec;
++	u8 last_dpdm;
++	u8 last_pd_vmax;
++	u8 last_pd_imax;
++	unsigned int retries;
++	bool state_valid;
++};
++
++static const struct regmap_config sc2021_regmap_config = {
++	.reg_bits = 8,
++	.val_bits = 8,
++	.max_register = SC2021_REG_FW_VERSION,
++	.cache_type = REGCACHE_NONE,
++};
++
++static int sc2021_read_u8(struct sc2021_device *sc, unsigned int reg, u8 *val)
++{
++	unsigned int raw;
++	int ret;
++
++	ret = regmap_read(sc->regmap, reg, &raw);
++	if (ret)
++		return ret;
++
++	*val = raw & 0xff;
++	return 0;
++}
++
++static int sc2021_read_be16(struct sc2021_device *sc, unsigned int reg_msb,
++			    u16 *val)
++{
++	u8 buf[2];
++	int ret;
++
++	ret = regmap_bulk_read(sc->regmap, reg_msb, buf, sizeof(buf));
++	if (ret)
++		return ret;
++
++	*val = ((u16)buf[0] << 8) | buf[1];
++	return 0;
++}
++
++/**
++ * sc2021_sync_dpdm_mux() - Route DPDM/OTG GPIOs per controller state.
++ * @sc: SC2021 device instance.
++ * @dpdm_state: Cached value of SC2021_REG_DPDM_IN_STATE.
++ */
++static void sc2021_sync_dpdm_mux(struct sc2021_device *sc, u8 dpdm_state)
++{
++	/* Bit 6 clear delegates DPDM/OTG lines to SC2021; set delegates to EC. */
++	int mux_to_sc2021 = !(dpdm_state & SC2021_DPDM_MCU_CTRL);
++
++	gpiod_set_value_cansleep(sc->pdotg_gpio, mux_to_sc2021);
++	gpiod_set_value_cansleep(sc->dpdm_gpio, mux_to_sc2021);
++}
++
++static void sc2021_typec_evt_worker(struct work_struct *work)
++{
++	struct sc2021_device *sc =
++		container_of(work, struct sc2021_device, evt_work.work);
++	u8 typec = 0, dpdm = 0, pd_vmax = 0, pd_imax = 0;
++	bool changed = false;
++	int ret;
++
++	mutex_lock(&sc->lock);
++
++	ret = sc2021_read_u8(sc, SC2021_REG_TYPEC_STATE, &typec);
++	if (ret)
++		goto err_unlock;
++
++	ret = sc2021_read_u8(sc, SC2021_REG_DPDM_IN_STATE, &dpdm);
++	if (ret)
++		goto err_unlock;
++
++	sc2021_read_u8(sc, SC2021_REG_PD_VMAX, &pd_vmax);
++	sc2021_read_u8(sc, SC2021_REG_PD_IMAX, &pd_imax);
++
++	sc2021_sync_dpdm_mux(sc, dpdm);
++
++	if (!sc->state_valid || typec != sc->last_typec ||
++	    dpdm != sc->last_dpdm || pd_vmax != sc->last_pd_vmax ||
++	    pd_imax != sc->last_pd_imax) {
++		sc->last_typec = typec;
++		sc->last_dpdm = dpdm;
++		sc->last_pd_vmax = pd_vmax;
++		sc->last_pd_imax = pd_imax;
++		sc->state_valid = true;
++		changed = true;
++	}
++
++	if ((typec & SC2021_TYPEC_ATTACHED_SNK) &&
++	    !(dpdm & SC2021_CHG_DET_READY) &&
++	    sc->retries < SC2021_MAX_DET_RETRIES) {
++		sc->retries++;
++		schedule_delayed_work(&sc->evt_work,
++				      msecs_to_jiffies(SC2021_RETRY_DELAY_MS));
++	} else {
++		sc->retries = 0;
++	}
++
++	mutex_unlock(&sc->lock);
++
++	if (changed && sc->psy) {
++		dev_info(sc->dev,
++			 "typec=0x%02x dpdm=0x%02x pd=%umV/%umA\n",
++			 typec, dpdm,
++			 pd_vmax * (SC2021_VBUS_STEP_UV / 1000),
++			 pd_imax * (SC2021_IBUS_STEP_UA / 1000));
++		power_supply_changed(sc->psy);
++	}
++	return;
++
++err_unlock:
++	mutex_unlock(&sc->lock);
++	dev_err_ratelimited(sc->dev, "failed to read SC2021 event state: %d\n",
++			    ret);
++}
++
++static irqreturn_t sc2021_irq_handler(int irq, void *data)
++{
++	struct sc2021_device *sc = data;
++
++	mutex_lock(&sc->lock);
++	sc->retries = 0;
++	mutex_unlock(&sc->lock);
++
++	mod_delayed_work(system_wq, &sc->evt_work, msecs_to_jiffies(30));
++	return IRQ_HANDLED;
++}
++
++static enum power_supply_property sc2021_psy_props[] = {
++	POWER_SUPPLY_PROP_STATUS,
++	POWER_SUPPLY_PROP_ONLINE,
++	POWER_SUPPLY_PROP_USB_TYPE,
++	POWER_SUPPLY_PROP_VOLTAGE_MAX,
++	POWER_SUPPLY_PROP_VOLTAGE_NOW,
++	POWER_SUPPLY_PROP_CURRENT_MAX,
++	POWER_SUPPLY_PROP_CURRENT_NOW,
++	POWER_SUPPLY_PROP_MODEL_NAME,
++	POWER_SUPPLY_PROP_MANUFACTURER,
++};
++
++static int sc2021_psy_get_property(struct power_supply *psy,
++				   enum power_supply_property psp,
++				   union power_supply_propval *val)
++{
++	struct sc2021_device *sc = power_supply_get_drvdata(psy);
++	u8 v8 = 0, pd_vmax = 0;
++	u16 mv = 0;
++	int ret = 0;
++
++	switch (psp) {
++	case POWER_SUPPLY_PROP_STATUS:
++		ret = sc2021_read_u8(sc, SC2021_REG_TYPEC_STATE, &v8);
++		if (ret)
++			return ret;
++		if (v8 & SC2021_TYPEC_ATTACHED_SNK)
++			val->intval = POWER_SUPPLY_STATUS_CHARGING;
++		else if (v8 & SC2021_TYPEC_ATTACHED_SRC)
++			val->intval = POWER_SUPPLY_STATUS_DISCHARGING;
++		else
++			val->intval = POWER_SUPPLY_STATUS_NOT_CHARGING;
++		return 0;
++
++	case POWER_SUPPLY_PROP_ONLINE:
++		ret = sc2021_read_u8(sc, SC2021_REG_TYPEC_STATE, &v8);
++		if (ret)
++			return ret;
++		val->intval = !!(v8 & SC2021_TYPEC_ATTACHED_SNK);
++		return 0;
++
++	case POWER_SUPPLY_PROP_USB_TYPE:
++		ret = sc2021_read_u8(sc, SC2021_REG_TYPEC_STATE, &v8);
++		if (ret)
++			return ret;
++		if (!(v8 & SC2021_TYPEC_ATTACHED_SNK)) {
++			val->intval = POWER_SUPPLY_USB_TYPE_UNKNOWN;
++			return 0;
++		}
++		ret = sc2021_read_u8(sc, SC2021_REG_PD_VMAX, &pd_vmax);
++		if (ret)
++			return ret;
++		if (pd_vmax * (SC2021_VBUS_STEP_UV / 1000) > 5500)
++			val->intval = POWER_SUPPLY_USB_TYPE_PD;
++		else
++			val->intval = POWER_SUPPLY_USB_TYPE_C;
++		return 0;
++
++	case POWER_SUPPLY_PROP_VOLTAGE_MAX:
++		ret = sc2021_read_u8(sc, SC2021_REG_PD_VMAX, &v8);
++		if (ret)
++			return ret;
++		val->intval = (int)v8 * SC2021_VBUS_STEP_UV;
++		return 0;
++
++	case POWER_SUPPLY_PROP_VOLTAGE_NOW:
++		ret = sc2021_read_u8(sc, SC2021_REG_VBUS_ADC, &v8);
++		if (ret)
++			return ret;
++		if (v8) {
++			val->intval = (int)v8 * SC2021_VBUS_STEP_UV;
++			return 0;
++		}
++		ret = sc2021_read_be16(sc, SC2021_REG_VBUS_EXT_MSB, &mv);
++		if (ret)
++			return ret;
++		val->intval = (int)mv * 1000;
++		return 0;
++
++	case POWER_SUPPLY_PROP_CURRENT_MAX:
++		ret = sc2021_read_u8(sc, SC2021_REG_PD_IMAX, &v8);
++		if (ret)
++			return ret;
++		val->intval = (int)v8 * SC2021_IBUS_STEP_UA;
++		return 0;
++
++	case POWER_SUPPLY_PROP_CURRENT_NOW:
++		ret = sc2021_read_u8(sc, SC2021_REG_IBUS_ADC, &v8);
++		if (ret)
++			return ret;
++		val->intval = (int)v8 * SC2021_IBUS_STEP_UA;
++		return 0;
++
++	case POWER_SUPPLY_PROP_MODEL_NAME:
++		val->strval = sc->fw_ver;
++		return 0;
++
++	case POWER_SUPPLY_PROP_MANUFACTURER:
++		val->strval = "Southchip";
++		return 0;
++
++	default:
++		return -EINVAL;
++	}
++}
++
++static const struct power_supply_desc sc2021_psy_desc = {
++	.name = "sc2021-typec",
++	.type = POWER_SUPPLY_TYPE_USB,
++	.usb_types = BIT(POWER_SUPPLY_USB_TYPE_UNKNOWN) |
++		     BIT(POWER_SUPPLY_USB_TYPE_C) |
++		     BIT(POWER_SUPPLY_USB_TYPE_PD),
++	.properties = sc2021_psy_props,
++	.num_properties = ARRAY_SIZE(sc2021_psy_props),
++	.get_property = sc2021_psy_get_property,
++};
++
++static int sc2021_probe(struct i2c_client *client)
++{
++	struct power_supply_config psy_cfg = {};
++	struct device *dev = &client->dev;
++	struct sc2021_device *sc;
++	u8 ver = 0;
++	int ret;
++
++	sc = devm_kzalloc(dev, sizeof(*sc), GFP_KERNEL);
++	if (!sc)
++		return -ENOMEM;
++
++	sc->dev = dev;
++	mutex_init(&sc->lock);
++	INIT_DELAYED_WORK(&sc->evt_work, sc2021_typec_evt_worker);
++	i2c_set_clientdata(client, sc);
++
++	ret = devm_regulator_get_enable_optional(dev, "vdd");
++	if (ret < 0 && ret != -ENODEV)
++		return dev_err_probe(dev, ret, "failed to enable vdd supply\n");
++
++	sc->regmap = devm_regmap_init_i2c(client, &sc2021_regmap_config);
++	if (IS_ERR(sc->regmap))
++		return dev_err_probe(dev, PTR_ERR(sc->regmap),
++				     "failed to init regmap\n");
++
++	ret = sc2021_read_u8(sc, SC2021_REG_FW_VERSION, &ver);
++	if (ret)
++		return dev_err_probe(dev, ret, "failed to read SC2021 version\n");
++
++	scnprintf(sc->fw_ver, sizeof(sc->fw_ver), "SC2021 V%u.%u",
++		  (ver >> 4) & 0xf, ver & 0xf);
++
++	sc->pdotg_gpio = devm_gpiod_get_optional(dev, "pdotg", GPIOD_OUT_LOW);
++	if (IS_ERR(sc->pdotg_gpio))
++		return dev_err_probe(dev, PTR_ERR(sc->pdotg_gpio),
++				     "failed to get pdotg gpio\n");
++
++	sc->dpdm_gpio = devm_gpiod_get_optional(dev, "dpdm", GPIOD_OUT_LOW);
++	if (IS_ERR(sc->dpdm_gpio))
++		return dev_err_probe(dev, PTR_ERR(sc->dpdm_gpio),
++				     "failed to get dpdm gpio\n");
++
++	psy_cfg.of_node = dev->of_node;
++	psy_cfg.drv_data = sc;
++	sc->psy = devm_power_supply_register(dev, &sc2021_psy_desc, &psy_cfg);
++	if (IS_ERR(sc->psy))
++		return dev_err_probe(dev, PTR_ERR(sc->psy),
++				     "failed to register power supply\n");
++
++	if (client->irq > 0) {
++		ret = devm_request_threaded_irq(dev, client->irq, NULL,
++						sc2021_irq_handler,
++						IRQF_TRIGGER_RISING |
++						IRQF_TRIGGER_FALLING |
++						IRQF_ONESHOT,
++						"sc2021", sc);
++		if (ret)
++			return dev_err_probe(dev, ret,
++					     "failed to request irq %d\n",
++					     client->irq);
++	}
++
++	schedule_delayed_work(&sc->evt_work, 0);
++	dev_info(dev, "%s probed\n", sc->fw_ver);
++	return 0;
++}
++
++static void sc2021_remove(struct i2c_client *client)
++{
++	struct sc2021_device *sc = i2c_get_clientdata(client);
++
++	cancel_delayed_work_sync(&sc->evt_work);
++}
++
++static int sc2021_suspend(struct device *dev)
++{
++	struct sc2021_device *sc = dev_get_drvdata(dev);
++
++	cancel_delayed_work_sync(&sc->evt_work);
++	return 0;
++}
++
++static int sc2021_resume(struct device *dev)
++{
++	struct sc2021_device *sc = dev_get_drvdata(dev);
++
++	mutex_lock(&sc->lock);
++	sc->retries = 0;
++	sc->state_valid = false;
++	mutex_unlock(&sc->lock);
++
++	schedule_delayed_work(&sc->evt_work, msecs_to_jiffies(50));
++	return 0;
++}
++
++static DEFINE_SIMPLE_DEV_PM_OPS(sc2021_pm_ops, sc2021_suspend, sc2021_resume);
++
++static const struct of_device_id sc2021_of_match[] = {
++	{ .compatible = "southchip,sc2021" },
++	{}
++};
++MODULE_DEVICE_TABLE(of, sc2021_of_match);
++
++static const struct i2c_device_id sc2021_i2c_id[] = {
++	{ "sc2021", 0 },
++	{}
++};
++MODULE_DEVICE_TABLE(i2c, sc2021_i2c_id);
++
++static struct i2c_driver sc2021_driver = {
++	.driver = {
++		.name = "sc2021-charger",
++		.of_match_table = sc2021_of_match,
++		.pm = pm_sleep_ptr(&sc2021_pm_ops),
++	},
++	.probe = sc2021_probe,
++	.remove = sc2021_remove,
++	.id_table = sc2021_i2c_id,
++};
++module_i2c_driver(sc2021_driver);
++
++MODULE_AUTHOR("CloudBook Air Linux Port");
++MODULE_DESCRIPTION("Southchip SC2021 Type-C PD port controller driver");
++MODULE_LICENSE("GPL");

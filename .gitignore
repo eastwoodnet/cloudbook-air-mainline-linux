@@ -1,0 +1,36 @@
+# Local kernel source & incremental build directories
+linux-6.12/
+kernel_build/
+
+# Local eMMC factory backups, OTA zips, and binary build artifacts (NEVER push)
+factory_backup/
+artifacts/
+W6XX_W52X-RK3568-T-ALLV2.25.20P06-Firmware.zip
+
+# Private SSH keys / local rootfs scratch
+rootfs_build/
+
+# Binary firmware, disk images, compiled objects & modules
+*.img
+*.img.zst
+*.bin
+*.dtb
+*.dtbo
+*.ko
+*.o
+*.a
+*.tar
+*.tar.gz
+*.tar.xz
+*.xz
+*.zip
+*.hex
+*.dump
+*.log
+*.bak
+
+# Tooling / Python caches
+.agents/
+__pycache__/
+*.pyc
+.DS_Store

@@ -1,0 +1,32 @@
+// SPDX-License-Identifier: (GPL-2.0+ OR MIT)
+#include "rk3568-ecloudbook-air-24rtw-v27-hall-pmdebug.dts"
+
+/*
+ * Keep clk_usbphy1_480m (&usb2phy1) enabled while OHCI/EHCI host controllers
+ * perform ohci_suspend() / ehci_suspend() register accesses. Without this 4th
+ * clock ("utmi"), hcd_bus_suspend() turns off usb2phy1's 480M clock before
+ * platform_pm_suspend(), causing ohci-platform fd8c0000.usb to hang on MMIO.
+ */
+&usb_host0_ehci {
+	clocks = <&cru HCLK_USB2HOST0>, <&cru HCLK_USB2HOST0_ARB>,
+		 <&cru PCLK_USB>, <&usb2phy1>;
+	clock-names = "usbhost", "arbiter", "pclk", "utmi";
+};
+
+&usb_host0_ohci {
+	clocks = <&cru HCLK_USB2HOST0>, <&cru HCLK_USB2HOST0_ARB>,
+		 <&cru PCLK_USB>, <&usb2phy1>;
+	clock-names = "usbhost", "arbiter", "pclk", "utmi";
+};
+
+&usb_host1_ehci {
+	clocks = <&cru HCLK_USB2HOST1>, <&cru HCLK_USB2HOST1_ARB>,
+		 <&cru PCLK_USB>, <&usb2phy1>;
+	clock-names = "usbhost", "arbiter", "pclk", "utmi";
+};
+
+&usb_host1_ohci {
+	clocks = <&cru HCLK_USB2HOST1>, <&cru HCLK_USB2HOST1_ARB>,
+		 <&cru PCLK_USB>, <&usb2phy1>;
+	clock-names = "usbhost", "arbiter", "pclk", "utmi";
+};

@@ -1,0 +1,23 @@
+// SPDX-License-Identifier: (GPL-2.0+ OR MIT)
+/*
+ * Diagnostic Test 3 DTS for China Mobile (ZTE) CloudBook Air CT2000-24RTW:
+ * Adds GIC/ITS 4.19/seewo-sv21 alignment (delete dma-noncoherent and mbi-*,
+ * disable rng) on top of v8-419align, for pairing with kernel_build/out-6.12-diag.
+ */
+
+#include "rk3568-ecloudbook-air-24rtw-v8-419align.dts"
+
+&gic {
+	/delete-property/ dma-noncoherent;
+	/delete-property/ mbi-alias;
+	/delete-property/ mbi-ranges;
+	/delete-property/ msi-controller;
+};
+
+&its {
+	/delete-property/ dma-noncoherent;
+};
+
+&rng {
+	status = "disabled";
+};

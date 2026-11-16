@@ -1,0 +1,12 @@
+// SPDX-License-Identifier: (GPL-2.0+ OR MIT)
+/*
+ * P4-2 Variable 3 (v13): Enable HDMI Video Output (&hdmi)
+ * Strictly single-variable delta on top of v12-gpu:
+ *  - &hdmi (fe0a0000.hdmi, dw-hdmi via VOP2 VP0 / HPLL) -> status = "okay";
+ */
+
+#include "rk3568-ecloudbook-air-24rtw-v12-gpu.dts"
+
+&hdmi {
+	status = "okay";
+};

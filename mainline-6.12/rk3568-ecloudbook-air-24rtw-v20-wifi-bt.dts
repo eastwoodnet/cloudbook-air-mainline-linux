@@ -1,0 +1,12 @@
+// SPDX-License-Identifier: (GPL-2.0+ OR MIT)
+/*
+ * P4-2 Variable 10 (v20): Enable SDIO Wi-Fi + Bluetooth Combo (&sdmmc1 MT7663S)
+ * Strictly single-variable delta on top of v19-pdm:
+ *  - &sdmmc1 (fe2c0000.mmc) -> status = "okay";
+ */
+
+#include "rk3568-ecloudbook-air-24rtw-v19-pdm.dts"
+
+&sdmmc1 {
+	status = "okay";
+};

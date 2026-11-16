@@ -1,0 +1,17 @@
+// SPDX-License-Identifier: (GPL-2.0+ OR MIT)
+/*
+ * ZTE CloudBook Air (CT2000-24RTW / RK3568B2)
+ * v29: Internal eMMC Rootfs (LABEL=EMMC_ROOTFS on /dev/mmcblk0p20)
+ *      Inherits all v28 fixes (USB2 PHY clock consumer links, Hall lid switch
+ *      GPIO0_B7 pull-up, RK817 PMIC/RTC/pwrkey wakeup, SC2021 PD, BQ25700,
+ *      CW2015 battery, ES8388 audio, MT7663S Wi-Fi/BT, eDP 1920x1200, HDMI).
+ */
+
+#include "rk3568-ecloudbook-air-24rtw-v28-usb2-pm-fix.dts"
+
+/ {
+	chosen {
+		stdout-path = "serial2:115200n8";
+		bootargs = "console=tty0 console=ttyS2,115200n8 root=LABEL=EMMC_ROOTFS rootfstype=ext4 rootwait rw net.ifnames=0 clk_ignore_unused pd_ignore_unused cpuidle.off=1 systemd.show_status=1 systemd.default_timeout_start_sec=15s loglevel=7 no_console_suspend";
+	};
+};

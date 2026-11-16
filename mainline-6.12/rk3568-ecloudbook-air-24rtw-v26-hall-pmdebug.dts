@@ -1,0 +1,26 @@
+// SPDX-License-Identifier: (GPL-2.0+ OR MIT)
+/*
+ * P6 Suspend & Lid Hall Bring-up (v26):
+ *  - Restore GPIO0_B7 internal bias-pull-up (&pcfg_pull_up) on lid-switch
+ *    matching factory_w620d_v12.dts (hall-irq <0x00 0x0f 0x00 0x124>), since
+ *    the open-drain Hall sensor reads stuck LOW (SW_LID=1) under RK3568
+ *    PMU_GRF default pull-down when no pinctrl pull-up is applied.
+ */
+#include "rk3568-ecloudbook-air-24rtw-v25-charger-pd.dts"
+
+/ {
+	gpio-keys {
+		lid-switch {
+			pinctrl-names = "default";
+			pinctrl-0 = <&hall_irq>;
+		};
+	};
+};
+
+&pinctrl {
+	hallstatus {
+		hall_irq: hall-irq {
+			rockchip,pins = <0 RK_PB7 RK_FUNC_GPIO &pcfg_pull_up>;
+		};
+	};
+};

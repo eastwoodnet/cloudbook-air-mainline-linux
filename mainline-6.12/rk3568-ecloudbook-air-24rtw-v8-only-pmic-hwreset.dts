@@ -1,0 +1,52 @@
+// SPDX-License-Identifier: (GPL-2.0+ OR MIT)
+/*
+ * Root-cause splitter DTS: changes ONLY pmic_hwreset (GPIO0_A0) handling
+ * relative to v8-heartbeat, keeping original CRU clocks and 500mV NPU init.
+ */
+
+#include "rk3568-ecloudbook-air-24rtw-v5-g3-clean.dts"
+#include <dt-bindings/gpio/gpio.h>
+#include <dt-bindings/pinctrl/rockchip.h>
+
+&{/reserved-memory} {
+	/delete-node/ shmem@10f000;
+};
+
+&{/} {
+	scmi_shmem: scmi-shmem@10f000 {
+		compatible = "arm,scmi-shmem";
+		reg = <0x0 0x0010f000 0x0 0x100>;
+	};
+};
+
+&chosen {
+	stdout-path = "serial2:115200n8";
+	bootargs = "console=ttyS2,115200n8 root=LABEL=ROOTFS rootfstype=ext4 rootwait rw net.ifnames=0 clk_ignore_unused pd_ignore_unused cpuidle.off=1 quiet";
+};
+
+&uart2 {
+	/delete-property/ dmas;
+	/delete-property/ dma-names;
+};
+
+&wdt {
+	status = "okay";
+};
+
+&gpio0 {
+	pmic-hwreset-hog {
+		gpio-hog;
+		gpios = <RK_PA0 GPIO_ACTIVE_HIGH>;
+		output-low;
+		line-name = "pmic_hwreset";
+	};
+};
+
+&rk809 {
+	pinctrl-names = "default", "pmic-sleep", "pmic-power-off", "pmic-reset", "pmic-hwreset";
+	pinctrl-0 = <&pmic_int>, <&i2s1m0_mclk>;
+	pinctrl-4 = <&pmic_hwreset>;
+	pmichwreset-gpios = <&gpio0 RK_PA0 GPIO_ACTIVE_HIGH>;
+	pmic-reset-func = <0>;
+	not-save-power-en = <1>;
+};

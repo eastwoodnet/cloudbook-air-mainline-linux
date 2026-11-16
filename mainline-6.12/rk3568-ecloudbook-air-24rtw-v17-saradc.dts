@@ -1,0 +1,12 @@
+// SPDX-License-Identifier: (GPL-2.0+ OR MIT)
+/*
+ * P4-2 Variable 7 (v17): Enable SARADC (&saradc)
+ * Strictly single-variable delta on top of v16-tsadc:
+ *  - &saradc (fe720000.saradc) -> status = "okay";
+ */
+
+#include "rk3568-ecloudbook-air-24rtw-v16-tsadc.dts"
+
+&saradc {
+	status = "okay";
+};

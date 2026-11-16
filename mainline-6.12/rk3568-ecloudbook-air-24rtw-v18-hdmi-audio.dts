@@ -1,0 +1,17 @@
+// SPDX-License-Identifier: (GPL-2.0+ OR MIT)
+/*
+ * P4-2 Variable 8 (v18): Enable HDMI Digital Audio (&i2s0_8ch + &hdmi_sound)
+ * Strictly single-variable delta on top of v17-saradc:
+ *  - &i2s0_8ch (fe400000.i2s) -> status = "okay";
+ *  - &hdmi_sound (rockchip,hdmi) -> status = "okay";
+ */
+
+#include "rk3568-ecloudbook-air-24rtw-v17-saradc.dts"
+
+&i2s0_8ch {
+	status = "okay";
+};
+
+&hdmi_sound {
+	status = "okay";
+};

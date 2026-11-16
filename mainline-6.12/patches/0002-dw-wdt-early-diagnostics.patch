@@ -1,0 +1,104 @@
+--- build/6.12-v7/dw_wdt.c.orig	2026-11-11 09:01:11.000000000 +0800
++++ linux-6.12/drivers/watchdog/dw_wdt.c	2026-11-12 20:17:45.423805166 +0800
+@@ -27,6 +27,7 @@
+ #include <linux/platform_device.h>
+ #include <linux/pm.h>
+ #include <linux/reset.h>
++#include <linux/timer.h>
+ #include <linux/watchdog.h>
+ 
+ #define WDOG_CONTROL_REG_OFFSET		    0x00
+@@ -99,6 +100,63 @@
+ 
+ #define to_dw_wdt(wdd)	container_of(wdd, struct dw_wdt, wdd)
+ 
++/*
++ * CloudBook Air bring-up diagnostic: the vendor bootloader may hand over an
++ * already-running DW watchdog, while the built-in driver only probes at
++ * device_initcall level.  Read the block at arch_initcall time and, if it is
++ * armed, keep it alive so one boot can distinguish a watchdog reset from a
++ * PMIC/EC reset.
++ */
++#define DW_WDT_EARLY_PHYS	0xfe600000
++
++static void __iomem *dw_wdt_early_base;
++static struct timer_list dw_wdt_early_timer;
++static unsigned int dw_wdt_early_ticks;
++
++static void dw_wdt_early_tick(struct timer_list *t)
++{
++	u32 cr = readl(dw_wdt_early_base + WDOG_CONTROL_REG_OFFSET);
++	u32 torr = readl(dw_wdt_early_base + WDOG_TIMEOUT_RANGE_REG_OFFSET);
++	u32 ccvr = readl(dw_wdt_early_base + WDOG_CURRENT_COUNT_REG_OFFSET);
++
++	if (!(dw_wdt_early_ticks++ % 10))
++		pr_info("dw_wdt_early: t=%llu cr=%08x torr=%08x ccvr=%08x\n",
++			ktime_get_ns(), cr, torr, ccvr);
++
++	writel(WDOG_COUNTER_RESTART_KICK_VALUE,
++	       dw_wdt_early_base + WDOG_COUNTER_RESTART_REG_OFFSET);
++	mod_timer(t, jiffies + msecs_to_jiffies(100));
++}
++
++static int __init dw_wdt_early_diag(void)
++{
++	u32 cr, torr, ccvr, comp1;
++
++	dw_wdt_early_base = ioremap(DW_WDT_EARLY_PHYS, 0x100);
++	if (!dw_wdt_early_base)
++		return 0;
++
++	cr = readl(dw_wdt_early_base + WDOG_CONTROL_REG_OFFSET);
++	torr = readl(dw_wdt_early_base + WDOG_TIMEOUT_RANGE_REG_OFFSET);
++	ccvr = readl(dw_wdt_early_base + WDOG_CURRENT_COUNT_REG_OFFSET);
++	comp1 = readl(dw_wdt_early_base + WDOG_COMP_PARAMS_1_REG_OFFSET);
++
++	pr_info("dw_wdt_early: t=%llu cr=%08x torr=%08x ccvr=%08x comp1=%08x\n",
++		ktime_get_ns(), cr, torr, ccvr, comp1);
++
++	if (cr & WDOG_CONTROL_REG_WDT_EN_MASK) {
++		pr_warn("dw_wdt_early: WDT is already enabled, feeding every 100ms\n");
++		writel(WDOG_COUNTER_RESTART_KICK_VALUE,
++		       dw_wdt_early_base + WDOG_COUNTER_RESTART_REG_OFFSET);
++		timer_setup(&dw_wdt_early_timer, dw_wdt_early_tick, 0);
++		mod_timer(&dw_wdt_early_timer,
++			  jiffies + msecs_to_jiffies(100));
++	}
++
++	return 0;
++}
++arch_initcall(dw_wdt_early_diag);
++
+ static inline int dw_wdt_is_enabled(struct dw_wdt *dw_wdt)
+ {
+ 	return readl(dw_wdt->regs + WDOG_CONTROL_REG_OFFSET) &
+@@ -560,6 +618,11 @@
+ 	if (IS_ERR(dw_wdt->regs))
+ 		return PTR_ERR(dw_wdt->regs);
+ 
++	pr_info("dw_wdt: probe enter cr=%08x torr=%08x ccvr=%08x\n",
++		readl(dw_wdt->regs + WDOG_CONTROL_REG_OFFSET),
++		readl(dw_wdt->regs + WDOG_TIMEOUT_RANGE_REG_OFFSET),
++		readl(dw_wdt->regs + WDOG_CURRENT_COUNT_REG_OFFSET));
++
+ 	/*
+ 	 * Try to request the watchdog dedicated timer clock source. It must
+ 	 * be supplied if asynchronous mode is enabled. Otherwise fallback
+@@ -577,6 +640,9 @@
+ 	if (dw_wdt->rate == 0)
+ 		return -EINVAL;
+ 
++	pr_info("dw_wdt: tclk rate=%lu enabled=%d\n", dw_wdt->rate,
++		dw_wdt_is_enabled(dw_wdt));
++
+ 	/*
+ 	 * Request APB clock if device is configured with async clocks mode.
+ 	 * In this case both tclk and pclk clocks are supposed to be specified.
+@@ -654,6 +720,7 @@
+ 	watchdog_stop_on_reboot(wdd);
+ 
+ 	ret = watchdog_register_device(wdd);
++	pr_info("dw_wdt: registered timeout=%u ret=%d\n", wdd->timeout, ret);
+ 	if (ret)
+ 		goto out_assert_rst;
+ 

@@ -1,0 +1,118 @@
+From: CloudBook Air Linux Port <port@cloudbookair.local>
+Subject: [PATCH] mt76: mt7663s: disable P2P, ROC, and sched_scan on W103D
+
+Clear P2P interface modes/features, remain-on-channel, and scheduled scan
+capabilities on W103D so NetworkManager and wpa_supplicant do not spawn
+p2p-dev-wlan0 or trigger N9 firmware hangs after reboot.
+---
+diff --git a/drivers/net/wireless/mediatek/mt76/mt7663s/mt7663s_w103d.h b/drivers/net/wireless/mediatek/mt76/mt7663s/mt7663s_w103d.h
+--- a/drivers/net/wireless/mediatek/mt76/mt7663s/mt7663s_w103d.h
++++ b/drivers/net/wireless/mediatek/mt76/mt7663s/mt7663s_w103d.h
+@@ -36,6 +36,8 @@
+ void mt7663s_w103d_txrx_worker_core(struct mt76_dev *mdev);
+ void mt7663s_w103d_init_mac_work(struct mt7615_dev *dev);
+ void mt7663s_w103d_limit_vht80(struct mt7615_dev *dev);
++void mt7663s_w103d_sanitize_wiphy(struct mt76_dev *mdev);
++int mt7663s_w103d_init_wiphy(struct mt76_dev *mdev);
+ unsigned int mt7663s_w103d_fw_headroom(struct mt76_dev *mdev);
+ u32 mt7663s_w103d_reg_rr(struct mt76_dev *mdev, u32 offset);
+ void mt7663s_w103d_reg_wr(struct mt76_dev *mdev, u32 offset, u32 value);
+diff --git a/drivers/net/wireless/mediatek/mt76/mt7663s/mt7663s_w103d.c b/drivers/net/wireless/mediatek/mt76/mt7663s/mt7663s_w103d.c
+--- a/drivers/net/wireless/mediatek/mt76/mt7663s/mt7663s_w103d.c
++++ b/drivers/net/wireless/mediatek/mt76/mt7663s/mt7663s_w103d.c
+@@ -1623,6 +1623,69 @@
+ 	return -EOPNOTSUPP;
+ }
+ 
++static const struct ieee80211_iface_limit w103d_if_limits[] = {
++	{
++		.max = 1,
++		.types = BIT(NL80211_IFTYPE_ADHOC)
++	}, {
++		.max = MT7615_MAX_INTERFACES,
++		.types = BIT(NL80211_IFTYPE_AP) |
++#ifdef CONFIG_MAC80211_MESH
++			 BIT(NL80211_IFTYPE_MESH_POINT) |
++#endif
++			 BIT(NL80211_IFTYPE_STATION)
++	}
++};
++
++static const struct ieee80211_iface_combination w103d_if_comb[] = {
++	{
++		.limits = w103d_if_limits,
++		.n_limits = ARRAY_SIZE(w103d_if_limits),
++		.max_interfaces = MT7615_MAX_INTERFACES,
++		.num_different_channels = 1,
++		.beacon_int_infra_match = true,
++	}
++};
++
++void mt7663s_w103d_sanitize_wiphy(struct mt76_dev *mdev)
++{
++	struct wiphy *wiphy = mdev->hw->wiphy;
++
++	/* W103D N9 firmware wedges on sched_scan commands and lacks P2P
++	 * OMAC/ROC support; disable both so cfg80211/NetworkManager never
++	 * declare p2p-dev-* interfaces or issue sched_scan requests.
++	 */
++	wiphy->flags &= ~WIPHY_FLAG_HAS_REMAIN_ON_CHANNEL;
++	wiphy->features &= ~(NL80211_FEATURE_P2P_GO_CTWIN |
++			     NL80211_FEATURE_P2P_GO_OPPPS |
++			     NL80211_FEATURE_SCHED_SCAN_RANDOM_MAC_ADDR);
++	wiphy->max_remain_on_channel_duration = 0;
++
++	wiphy->max_sched_scan_plan_interval = 0;
++	wiphy->max_sched_scan_plan_iterations = 0;
++	wiphy->max_sched_scan_ie_len = 0;
++	wiphy->max_sched_scan_ssids = 0;
++	wiphy->max_match_sets = 0;
++	wiphy->max_sched_scan_reqs = 0;
++}
++
++int mt7663s_w103d_init_wiphy(struct mt76_dev *mdev)
++{
++	struct wiphy *wiphy = mdev->hw->wiphy;
++
++	wiphy->interface_modes &= ~(BIT(NL80211_IFTYPE_P2P_CLIENT) |
++				    BIT(NL80211_IFTYPE_P2P_GO) |
++				    BIT(NL80211_IFTYPE_P2P_DEVICE));
++	wiphy->iface_combinations = w103d_if_comb;
++	wiphy->n_iface_combinations = ARRAY_SIZE(w103d_if_comb);
++	mt7663s_w103d_sanitize_wiphy(mdev);
++
++	dev_info(mdev->dev,
++		 "W103D: disabled P2P interface modes and sched_scan\n");
++
++	return 0;
++}
++
+ void mt7663s_w103d_limit_vht80(struct mt7615_dev *dev)
+ {
+ 	struct ieee80211_supported_band *sband =
+diff --git a/drivers/net/wireless/mediatek/mt76/mt7663s/sdio.c b/drivers/net/wireless/mediatek/mt76/mt7663s/sdio.c
+--- a/drivers/net/wireless/mediatek/mt76/mt7663s/sdio.c
++++ b/drivers/net/wireless/mediatek/mt76/mt7663s/sdio.c
+@@ -154,6 +154,8 @@
+ 	}
+ 
+ 	mt7615_init_work(dev);
++	if (mt7663s_w103d_active())
++		mt7663s_w103d_sanitize_wiphy(&dev->mt76);
+ 	mt7663s_w103d_configure_filter(dev->mt76.hw, 0, &filter_flags, 0);
+ 	mt7663s_w103d_limit_vht80(dev);
+ 	mt7663s_w103d_init_mac_work(dev);
+@@ -278,8 +280,13 @@
+ 		ops->bss_info_changed = mt7663s_bss_info_changed;
+ 		ops->hw_scan = mt7663s_w103d_hw_scan;
+ 		ops->cancel_hw_scan = mt7663s_w103d_cancel_hw_scan;
++		ops->sched_scan_start = NULL;
++		ops->sched_scan_stop = NULL;
++		ops->remain_on_channel = NULL;
++		ops->cancel_remain_on_channel = NULL;
+ 		ops->set_key = mt7663s_w103d_set_key;
+ 		ops->ampdu_action = mt7663s_w103d_ampdu_action;
++		mdev->init_wiphy = mt7663s_w103d_init_wiphy;
+ 	}
+ 
+ 	INIT_WORK(&dev->mcu_work, mt7663s_init_work);

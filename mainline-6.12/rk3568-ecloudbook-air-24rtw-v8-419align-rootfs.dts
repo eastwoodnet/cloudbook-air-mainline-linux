@@ -1,0 +1,13 @@
+// SPDX-License-Identifier: (GPL-2.0+ OR MIT)
+/*
+ * Production/Armbian-boot test DTS with 4.19 PMIC + clock alignment:
+ * Same HW configuration as v8-419align.dtb (which passed HB_V3_DONE),
+ * booting full Armbian initramfs -> USB ROOTFS with systemd status logs.
+ */
+
+#include "rk3568-ecloudbook-air-24rtw-v8-419align.dts"
+
+&chosen {
+	stdout-path = "serial2:115200n8";
+	bootargs = "console=ttyS2,115200n8 root=LABEL=ROOTFS rootfstype=ext4 rootwait rw net.ifnames=0 clk_ignore_unused pd_ignore_unused cpuidle.off=1 systemd.show_status=1 systemd.default_timeout_start_sec=15s";
+};

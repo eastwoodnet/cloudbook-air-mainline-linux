@@ -1,0 +1,28 @@
+// SPDX-License-Identifier: (GPL-2.0+ OR MIT)
+/*
+ * P4-2 Variable 4 (v14): Enable RK809 Analog Audio
+ * Strictly single-variable delta on top of v13-hdmi:
+ *  - &i2s1_8ch -> mainline rockchip,trcm-sync-tx-only + status = "okay"
+ *  - &rk809_codec -> status = "okay"
+ *  - &rk809_sound -> status = "okay"
+ */
+
+#include "rk3568-ecloudbook-air-24rtw-v13-hdmi.dts"
+
+&i2s1_8ch {
+	/delete-property/ rockchip,clk-trcm;
+	rockchip,trcm-sync-tx-only;
+	status = "okay";
+};
+
+&rk809_codec {
+	status = "okay";
+};
+
+&rk809_sound {
+	status = "okay";
+
+	simple-audio-card,codec {
+		sound-dai = <&rk809>;
+	};
+};

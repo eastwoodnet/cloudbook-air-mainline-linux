@@ -1,0 +1,13 @@
+// SPDX-License-Identifier: (GPL-2.0+ OR MIT)
+/*
+ * P4-2 Variable 2 (v12): Enable Mali-G52 GPU (&gpu, Panfrost)
+ * Strictly single-variable delta on top of v11-touchpad:
+ *  - &gpu (fde60000.gpu, panfrost) -> mali-supply = <&vdd_gpu>; status = "okay";
+ */
+
+#include "rk3568-ecloudbook-air-24rtw-v11-touchpad.dts"
+
+&gpu {
+	mali-supply = <&vdd_gpu>;
+	status = "okay";
+};

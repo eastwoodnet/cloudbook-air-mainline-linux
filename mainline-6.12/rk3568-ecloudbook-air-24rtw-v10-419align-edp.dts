@@ -1,0 +1,24 @@
+// SPDX-License-Identifier: (GPL-2.0+ OR MIT)
+/*
+ * P4-1 Display fix (v10) for China Mobile (ZTE) CloudBook Air CT2000-24RTW:
+ * Derives cleanly from v9-419align-edp and fixes the two runtime P4-1 bugs:
+ *  - Configure VPLL -> 659 MHz and DCLK_VOP1 -> 164.75 MHz (/4) via &vop
+ *    assigned-clocks (switching VPLL out of U-Boot's 24 MHz SLOW mode into
+ *    NORM mode so VOP2 runs at 60 Hz with EDP STRM_VALID=1 and zero vblank
+ *    or streamclk timeouts).
+ *  - Use factory 0..255 linear PWM8 backlight curve with default level 200.
+ */
+
+#include "rk3568-ecloudbook-air-24rtw-v9-419align-edp.dts"
+
+&backlight {
+	brightness-levels = <0 255>;
+	num-interpolated-steps = <255>;
+	default-brightness-level = <200>;
+};
+
+&vop {
+	assigned-clocks = <&cru DCLK_VOP0>, <&cru PLL_VPLL>, <&cru DCLK_VOP1>;
+	assigned-clock-parents = <&pmucru PLL_HPLL>, <&xin24m>, <&cru PLL_VPLL>;
+	assigned-clock-rates = <0>, <659000000>, <164750000>;
+};

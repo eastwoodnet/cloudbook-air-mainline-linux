@@ -1,0 +1,25 @@
+// SPDX-License-Identifier: (GPL-2.0+ OR MIT)
+/*
+ * P5 Stabilization (v25): Enable Southchip SC2021 PD controller and TI BQ25703A charger
+ *  - Restore power-supplies = <&bq25703> on &battery_gauge now that BQ25703A driver exists
+ *  - Set BQ25703A input-current-limit-microamp to 3250 mA (65W PD ceiling vs old 500 mA cap)
+ *  - Link &bq25703 <-> &battery_gauge / &sc2021 cleanly with dual-edge GPIO IRQs
+ */
+#include "rk3568-ecloudbook-air-24rtw-v24-audio-route.dts"
+
+&battery_gauge {
+	power-supplies = <&bq25703>;
+};
+
+&bq25703 {
+	interrupts = <RK_PB7 IRQ_TYPE_EDGE_BOTH>;
+	input-current-limit-microamp = <3250000>;
+	power-supplies = <&sc2021>;
+	ti,battery-psy = <&battery_gauge>;
+	status = "okay";
+};
+
+&sc2021 {
+	interrupts = <RK_PA4 IRQ_TYPE_EDGE_BOTH>;
+	status = "okay";
+};

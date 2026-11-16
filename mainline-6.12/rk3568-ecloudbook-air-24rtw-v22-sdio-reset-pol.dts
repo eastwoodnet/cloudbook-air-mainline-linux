@@ -1,0 +1,6 @@
+// SPDX-License-Identifier: (GPL-2.0+ OR MIT)
+#include "rk3568-ecloudbook-air-24rtw-v21-wl-power-pol.dts"
+
+&sdio_pwrseq {
+	reset-gpios = <&gpio0 RK_PB5 GPIO_ACTIVE_HIGH>;
+};

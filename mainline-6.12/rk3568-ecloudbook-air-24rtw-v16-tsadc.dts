@@ -1,0 +1,12 @@
+// SPDX-License-Identifier: (GPL-2.0+ OR MIT)
+/*
+ * P4-2 Variable 6 (v16): Enable SoC Thermal Sensor (&tsadc)
+ * Strictly single-variable delta on top of v15-battery:
+ *  - &tsadc (fe710000.tsadc, cpu-thermal & gpu-thermal zones) -> status = "okay";
+ */
+
+#include "rk3568-ecloudbook-air-24rtw-v15-battery.dts"
+
+&tsadc {
+	status = "okay";
+};

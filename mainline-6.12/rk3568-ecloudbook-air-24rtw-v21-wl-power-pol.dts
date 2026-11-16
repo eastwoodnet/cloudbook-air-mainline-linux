@@ -1,0 +1,7 @@
+// SPDX-License-Identifier: (GPL-2.0+ OR MIT)
+#include "rk3568-ecloudbook-air-24rtw-v20-wifi-bt.dts"
+
+&vcc_wl {
+	/delete-property/ enable-active-high;
+	gpio = <&gpio0 RK_PA5 GPIO_ACTIVE_LOW>;
+};

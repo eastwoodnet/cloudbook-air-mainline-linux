@@ -1,0 +1,23 @@
+// SPDX-License-Identifier: (GPL-2.0+ OR MIT)
+/*
+ * P6 Suspend & Lid Hall Bring-up (v27):
+ *  - Move pinctrl-names / pinctrl-0 = <&hall_irq> onto the parent /gpio-keys
+ *    platform device node (gpio_keys.c binds pinctrl on the parent device,
+ *    not on the child lid-switch node), so GPIO0_B7 actually gets &pcfg_pull_up.
+ */
+#include "rk3568-ecloudbook-air-24rtw-v25-charger-pd.dts"
+
+/ {
+	gpio-keys {
+		pinctrl-names = "default";
+		pinctrl-0 = <&hall_irq>;
+	};
+};
+
+&pinctrl {
+	hallstatus {
+		hall_irq: hall-irq {
+			rockchip,pins = <0 RK_PB7 RK_FUNC_GPIO &pcfg_pull_up>;
+		};
+	};
+};

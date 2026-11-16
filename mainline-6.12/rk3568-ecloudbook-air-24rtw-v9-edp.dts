@@ -1,0 +1,1444 @@
+// SPDX-License-Identifier: (GPL-2.0+ OR MIT)
+/*
+ * Device Tree for China Mobile (ZTE) CloudBook Air 14" (CT2000-24RTW / G601251)
+ * Hardware Board Revision: V12/V13 (RK3568B2 + 4GB LPDDR4 + 64GB eMMC + BOE NV140WUM-N44)
+ *
+ * Secondary-Audited & Reverse-Engineered from:
+ *   1. Factory live Device Tree (/sys/firmware/devicetree/base -> extracted_factory.dts)
+ *   2. REA / Ghidra 12.1.2 decompilation of 12 factory kernel 4.19.193 drivers:
+ *      - ztegpioctl_all.bin.c      (ztegpioctl_probe / suspend / resume)
+ *      - boardctl_all.bin.c        (boardctl_usb_probe / boardctl_main_probe)
+ *      - i2c_hid_all.bin.c         (i2c_hid_probe / suspend / resume)
+ *      - i2c_tp_en_dis.bin.c       (i2c_touchpad_set_enable / disable)
+ *      - panel_simple_all.bin.c    (panel_simple_probe / prepare / enable / get_modes)
+ *      - edp_phy_all.bin.c         (rockchip_edp_phy_configure V12/V13 BOE N44 override)
+ *      - analogix_dp_zte.bin.c     (analogix_dp_bind / cover_send_func Hall lid IRQ)
+ *      - rk_headset_all.bin.c      (rockchip_headset_probe / rk_headset_adc_probe)
+ *      - sc2021_probe.bin.c & sc2021_typec_evt_worker.bin.c (Southchip SC2021 PD)
+ *      - bq25700_pd_connect.bin.c  (TI BQ25700 charger PD negotiation)
+ *      - smart_battery_work.bin.c  (ZTE SBS 1.1 battery polling)
+ */
+
+/dts-v1/;
+
+#include <dt-bindings/gpio/gpio.h>
+#include <dt-bindings/input/input.h>
+#include <dt-bindings/interrupt-controller/arm-gic.h>
+#include <dt-bindings/power/rk3568-power.h>
+#include <dt-bindings/clock/rk3568-cru.h>
+#include <dt-bindings/phy/phy.h>
+#include <dt-bindings/leds/common.h>
+#include <dt-bindings/pinctrl/rockchip.h>
+#include <dt-bindings/soc/rockchip,vop2.h>
+#include "rk3568.dtsi"
+
+/ {
+	model = "China Mobile (ZTE) CloudBook Air CT2000-24RTW";
+	/*
+	 * Including "zte,w103d" activates pigeon2049/unifreq Linux 6.12/6.18
+	 * MT7663S SDIO Wi-Fi (037a:7603) + Bluetooth (037a:7663) combo driver fixes
+	 * (WHISR read-clear snapshot, 16-entry RX-enhance, eFuse BT/WiFi serialization).
+	 */
+	compatible = "zte,ecloudbook-air-24rtw", "zte,w103d", "rockchip,rk3568";
+
+	aliases {
+		ethernet0 = &gmac1;
+		mmc0 = &sdhci;
+		mmc1 = &sdmmc1;
+		serial2 = &uart2;
+	};
+
+	chosen: chosen {
+		stdout-path = "serial2:115200n8";
+		bootargs = "console=ttyS2,115200n8 earlycon=uart8250,mmio32,0xfe660000 root=LABEL=ROOTFS rootfstype=ext4 rootwait rw net.ifnames=0 clk_ignore_unused pd_ignore_unused cpuidle.off=1 ignore_loglevel systemd.show_status=1 systemd.default_timeout_start_sec=15s";
+		#address-cells = <2>;
+		#size-cells = <2>;
+		ranges;
+
+		framebuffer0: framebuffer@edf00000 {
+			compatible = "simple-framebuffer";
+			reg = <0x00 0xedf00000 0x00 0x008ca000>;
+			width = <1920>;
+			height = <1200>;
+			stride = <7680>;
+			format = "a8r8g8b8";
+			status = "disabled";
+		};
+	};
+
+	reserved-memory {
+		#address-cells = <2>;
+		#size-cells = <2>;
+		ranges;
+
+		drm_logo: drm-logo@edf00000 {
+			reg = <0x00 0xedf00000 0x00 0x00bddc36>;
+			no-map;
+		};
+
+		ramoops: ramoops@110000 {
+			compatible = "ramoops";
+			reg = <0x00 0x110000 0x00 0xf0000>;
+			record-size = <0x20000>;
+			console-size = <0x80000>;
+			pmsg-size = <0x50000>;
+		};
+	};
+
+	/* ====================================================================
+	 * 1. Power Tree & Fixed Regulators (Audited against extracted_factory.dts
+	 *    and decompiled ztegpioctl / i2c_hid / panel-simple / usb drivers)
+	 * ==================================================================== */
+
+	dc_12v: dc-12v-regulator {
+		compatible = "regulator-fixed";
+		regulator-name = "dc_12v";
+		regulator-always-on;
+		regulator-boot-on;
+		regulator-min-microvolt = <12000000>;
+		regulator-max-microvolt = <12000000>;
+	};
+
+	vcc3v3_sys: vcc3v3-sys-regulator {
+		compatible = "regulator-fixed";
+		regulator-name = "vcc3v3_sys";
+		regulator-always-on;
+		regulator-boot-on;
+		regulator-min-microvolt = <3300000>;
+		regulator-max-microvolt = <3300000>;
+		vin-supply = <&dc_12v>;
+	};
+
+	vcc5v0_sys: vcc5v0-sys-regulator {
+		compatible = "regulator-fixed";
+		regulator-name = "vcc5v0_sys";
+		regulator-always-on;
+		regulator-boot-on;
+		regulator-min-microvolt = <5000000>;
+		regulator-max-microvolt = <5000000>;
+		vin-supply = <&dc_12v>;
+	};
+
+	vcc2v5_ddr: vcc2v5-ddr-regulator {
+		compatible = "regulator-fixed";
+		regulator-name = "vcc2v5-sys";
+		regulator-always-on;
+		regulator-boot-on;
+		regulator-min-microvolt = <2500000>;
+		regulator-max-microvolt = <2500000>;
+		vin-supply = <&vcc3v3_sys>;
+	};
+
+	vcc3v3_bu: vcc3v3-bu-regulator {
+		compatible = "regulator-fixed";
+		regulator-name = "vcc3v3_bu";
+		regulator-always-on;
+		regulator-boot-on;
+		regulator-min-microvolt = <3300000>;
+		regulator-max-microvolt = <3300000>;
+		vin-supply = <&vcc5v0_sys>;
+	};
+
+	/*
+	 * Live hardware verification (/sys/kernel/debug/gpio & regulator_summary):
+	 * gpio-29 (GPIO0_D5) is claimed by vcc3v3_vga (out hi, always-on, 3.3V).
+	 */
+	vcc3v3_vga: vcc3v3-vga-regulator {
+		compatible = "regulator-fixed";
+		regulator-name = "vcc3v3_vga";
+		regulator-always-on;
+		regulator-boot-on;
+		regulator-min-microvolt = <3300000>;
+		regulator-max-microvolt = <3300000>;
+		enable-active-high;
+		gpio = <&gpio0 RK_PD5 GPIO_ACTIVE_HIGH>;
+		vin-supply = <&vcc3v3_sys>;
+	};
+
+	vcc5v0_usb: vcc5v0-usb-regulator {
+		compatible = "regulator-fixed";
+		regulator-name = "vcc5v0_usb";
+		regulator-always-on;
+		regulator-boot-on;
+		regulator-min-microvolt = <5000000>;
+		regulator-max-microvolt = <5000000>;
+		vin-supply = <&dc_12v>;
+	};
+
+	/*
+	 * USB Host 5V VBUS switch (supplies u2phy1_otg & u2phy1_host)
+	 * Factory DT: gpio = <&gpio3 RK_PA0 GPIO_ACTIVE_HIGH>
+	 */
+	vcc5v0_host: vcc5v0-host-regulator {
+		compatible = "regulator-fixed";
+		regulator-name = "vcc5v0_host";
+		regulator-boot-on;
+		regulator-always-on;
+		regulator-min-microvolt = <5000000>;
+		regulator-max-microvolt = <5000000>;
+		enable-active-high;
+		gpio = <&gpio3 RK_PA0 GPIO_ACTIVE_HIGH>;
+		vin-supply = <&vcc5v0_usb>;
+		pinctrl-names = "default";
+		pinctrl-0 = <&vcc5v0_host_en>;
+	};
+
+	/*
+	 * USB OTG / Type-C & USB3 Host PHY0 5V VBUS switch (supplies u2phy0_otg & u2phy0_host)
+	 * Factory DT: gpio = <&gpio0 RK_PC4 GPIO_ACTIVE_HIGH>
+	 */
+	vcc5v0_otg: vcc5v0-otg-regulator {
+		compatible = "regulator-fixed";
+		regulator-name = "vcc5v0_otg";
+		regulator-boot-on;
+		regulator-min-microvolt = <5000000>;
+		regulator-max-microvolt = <5000000>;
+		enable-active-high;
+		gpio = <&gpio0 RK_PC4 GPIO_ACTIVE_HIGH>;
+		vin-supply = <&vcc5v0_usb>;
+		pinctrl-names = "default";
+		pinctrl-0 = <&vcc5v0_otg_en>;
+	};
+
+	/*
+	 * eDP LCD Panel 3.3V power switch (vcc3v3_lcd_edp)
+	 * Factory DT: gpio = <&gpio2 RK_PD5 GPIO_ACTIVE_HIGH>, enable-active-high
+	 */
+	vcc3v3_lcd_edp: vcc3v3-lcd-edp {
+		compatible = "regulator-fixed";
+		regulator-name = "vcc3v3_lcd_edp";
+		regulator-boot-on;
+		regulator-min-microvolt = <3300000>;
+		regulator-max-microvolt = <3300000>;
+		enable-active-high;
+		gpio = <&gpio2 RK_PD5 GPIO_ACTIVE_HIGH>;
+		vin-supply = <&vcc3v3_sys>;
+		pinctrl-names = "default";
+		pinctrl-0 = <&edp_pwr_en>;
+
+		regulator-state-mem {
+			regulator-off-in-suspend;
+		};
+	};
+
+	/*
+	 * Touchpad Power Supply (GPIO3_B4) & Touchpad Reset/EC-Power (GPIO3_A1)
+	 * Reverse-engineered from i2c_hid_all.bin.c (FUN_ffffff80088fe660 / FUN_ffffff80088fed40):
+	 *   1. gpio-power   = <&gpio3 RK_PB4 GPIO_ACTIVE_HIGH> -> driven HIGH (1), wait 10ms
+	 *   2. gpio-reseten = <&gpio3 RK_PA1 GPIO_ACTIVE_HIGH> -> driven HIGH (1), wait 100ms
+	 * Both GPIOs MUST be HIGH for touchpad@2c (0911:5288) to come out of reset and respond on I2C4!
+	 */
+	vcc_touchpad: vcc-touchpad-regulator {
+		compatible = "regulator-fixed";
+		regulator-name = "vcc_touchpad";
+		regulator-always-on;
+		regulator-boot-on;
+		regulator-min-microvolt = <3300000>;
+		regulator-max-microvolt = <3300000>;
+		enable-active-high;
+		gpio = <&gpio3 RK_PB4 GPIO_ACTIVE_HIGH>;
+		startup-delay-us = <10000>;
+		vin-supply = <&vcc3v3_sys>;
+	};
+
+	vcc_tp_reset: vcc-tp-reset-regulator {
+		compatible = "regulator-fixed";
+		regulator-name = "vcc_tp_reset";
+		regulator-always-on;
+		regulator-boot-on;
+		regulator-min-microvolt = <3300000>;
+		regulator-max-microvolt = <3300000>;
+		enable-active-high;
+		gpio = <&gpio3 RK_PA1 GPIO_ACTIVE_HIGH>;
+		vin-supply = <&vcc_touchpad>;
+	};
+
+	/*
+	 * Internal SINO WEALTH USB Keyboard Power (GPIO0_C7)
+	 * Reverse-engineered from ztegpioctl_all.bin.c:
+	 *   gpio-keyboarpower = <&gpio0 RK_PC7 GPIO_ACTIVE_HIGH> -> driven HIGH (1) at boot & resume.
+	 */
+	vcc_keyboard: vcc-keyboard-regulator {
+		compatible = "regulator-fixed";
+		regulator-name = "vcc_keyboard";
+		regulator-always-on;
+		regulator-boot-on;
+		regulator-min-microvolt = <3300000>;
+		regulator-max-microvolt = <3300000>;
+		enable-active-high;
+		gpio = <&gpio0 RK_PC7 GPIO_ACTIVE_HIGH>;
+		vin-supply = <&vcc3v3_sys>;
+	};
+
+	/*
+	 * Internal UVC Webcam Power (GPIO3_A2)
+	 * Reverse-engineered from ztegpioctl_all.bin.c:
+	 *   gpio-cameraen = <&gpio3 RK_PA2 GPIO_ACTIVE_HIGH> -> driven HIGH (1) at boot & resume, LOW (0) in suspend.
+	 */
+	vcc_camera: vcc-camera-regulator {
+		compatible = "regulator-fixed";
+		regulator-name = "vcc_camera";
+		regulator-always-on;
+		regulator-boot-on;
+		regulator-min-microvolt = <3300000>;
+		regulator-max-microvolt = <3300000>;
+		enable-active-high;
+		gpio = <&gpio3 RK_PA2 GPIO_ACTIVE_HIGH>;
+		vin-supply = <&vcc3v3_sys>;
+
+		regulator-state-mem {
+			regulator-off-in-suspend;
+		};
+	};
+
+	/*
+	 * USB 2.0 Hub Reset Deassertion (GPIO0_B0)
+	 * CRITICAL POLARITY NOTE from ztegpioctl_all.bin.c (lines 51-53):
+	 *   ztegpioctl_probe calls gpiod_direction_output_raw(gpio_usb2hubrst, 0)!
+	 *   The USB2.0 Hub reset pin is ACTIVE-HIGH (1 = reset, 0 = normal operation).
+	 *   By omitting 'enable-active-high' below, regulator-fixed drives GPIO0_B0 LOW (0) when enabled!
+	 */
+	vcc_usb2hub_rst_n: vcc-usb2hub-rst-n-regulator {
+		compatible = "regulator-fixed";
+		regulator-name = "vcc_usb2hub_rst_n";
+		regulator-always-on;
+		regulator-boot-on;
+		regulator-min-microvolt = <3300000>;
+		regulator-max-microvolt = <3300000>;
+		gpio = <&gpio0 RK_PB0 GPIO_ACTIVE_LOW>;
+		vin-supply = <&vcc3v3_sys>;
+	};
+
+	/*
+	 * USB 3.0 Hub Power / Reset Deassertion (GPIO3_A5)
+	 * Reverse-engineered from boardctl_all.bin.c (FUN_ffffff8008819fa8 / zteusb_pm_resume):
+	 *   gpio-reset = <&gpio3 RK_PA5 GPIO_ACTIVE_HIGH> -> driven LOW (0) for 20ms, then HIGH (1)!
+	 *   Normal operation requires GPIO3_A5 = HIGH (1).
+	 */
+	vcc_usb3hub: vcc-usb3hub-regulator {
+		compatible = "regulator-fixed";
+		regulator-name = "vcc_usb3hub";
+		regulator-always-on;
+		regulator-boot-on;
+		regulator-min-microvolt = <3300000>;
+		regulator-max-microvolt = <3300000>;
+		enable-active-high;
+		gpio = <&gpio3 RK_PA5 GPIO_ACTIVE_HIGH>;
+		startup-delay-us = <20000>;
+		vin-supply = <&vcc3v3_sys>;
+		pinctrl-names = "default";
+		pinctrl-0 = <&zte_usbhub_reset_gpio>;
+	};
+
+	/* SC2021 供电必须常开，不能再由 LED 用户接口关闭。 */
+	vcc_sc2021: vcc-sc2021-regulator {
+		compatible = "regulator-fixed";
+		regulator-name = "vcc_sc2021";
+		regulator-always-on;
+		regulator-boot-on;
+		enable-active-high;
+		gpio = <&gpio0 RK_PA6 GPIO_ACTIVE_HIGH>;
+		vin-supply = <&vcc3v3_sys>;
+	};
+
+	/*
+	 * MediaTek MT7663S WiFi Power Enable (GPIO0_A5) & BT Reset Deassert (GPIO2_B7)
+	 * Factory DT:
+	 *   WIFI,poweren_gpio = <&gpio0 RK_PA5 GPIO_ACTIVE_HIGH>
+	 *   BT,reset_gpio     = <&gpio2 RK_PB7 GPIO_ACTIVE_HIGH>
+	 */
+	vcc_wl: vcc-wl-regulator {
+		compatible = "regulator-fixed";
+		regulator-name = "vcc_wl";
+		regulator-always-on;
+		regulator-boot-on;
+		regulator-min-microvolt = <3300000>;
+		regulator-max-microvolt = <3300000>;
+		enable-active-high;
+		gpio = <&gpio0 RK_PA5 GPIO_ACTIVE_HIGH>;
+		vin-supply = <&vcc3v3_sys>;
+		pinctrl-names = "default";
+		pinctrl-0 = <&wlan_power_on>;
+	};
+
+	vcc_bt_rst_n: vcc-bt-rst-n-regulator {
+		compatible = "regulator-fixed";
+		regulator-name = "vcc_bt_rst_n";
+		regulator-always-on;
+		regulator-boot-on;
+		regulator-min-microvolt = <3300000>;
+		regulator-max-microvolt = <3300000>;
+		enable-active-high;
+		gpio = <&gpio2 RK_PB7 GPIO_ACTIVE_HIGH>;
+		vin-supply = <&vcc3v3_sys>;
+	};
+
+	/* SDIO WiFi Power Sequence (MT7663S Reset on GPIO0_B5 + RK809 32.768kHz clock) */
+	sdio_pwrseq: sdio-pwrseq {
+		compatible = "mmc-pwrseq-simple";
+		clocks = <&rk809 1>;
+		clock-names = "ext_clock";
+		pinctrl-names = "default";
+		pinctrl-0 = <&wifi_enable_h>;
+		post-power-on-delay-ms = <200>;
+		reset-gpios = <&gpio0 RK_PB5 GPIO_ACTIVE_LOW>;
+	};
+
+	/* ====================================================================
+	 * 2. Display Subsystem: Backlight & BOE NV140WUM-N44 1920x1200 eDP Panel
+	 *    Audited against extracted_factory.dts & panel_simple_all.bin.c
+	 * ==================================================================== */
+
+	/*
+	 * Live hardware verification (/sys/kernel/debug/pwm & /sys/kernel/debug/gpio):
+	 *   - PWM device: platform/fe6f0000.pwm (&pwm8, period = 25000ns, polarity = normal)
+	 *   - Enable GPIO: gpio-91 = <&gpio2 RK_PD3 GPIO_ACTIVE_HIGH> (out hi)
+	 */
+	backlight: backlight {
+		compatible = "pwm-backlight";
+		pwms = <&pwm8 0 25000 0>;
+		/* 本机实际 backlight 节点使用线性 0..255，不套用备用 backlight1 曲线。 */
+		default-brightness-level = <200>;
+		enable-gpios = <&gpio2 RK_PD3 GPIO_ACTIVE_HIGH>;
+		pinctrl-names = "default";
+		pinctrl-0 = <&bl_en_gpio>;
+	};
+
+	/* ====================================================================
+	 * 3. Audio Subsystems (RK809 Speaker/HP + Digital PDM Mic Array + HDMI)
+	 *    Audited against extracted_factory.dts & rk_headset_all.bin.c
+	 * ==================================================================== */
+
+	rk809_sound: rk809-sound {
+		status = "disabled";
+		compatible = "simple-audio-card";
+		simple-audio-card,format = "i2s";
+		simple-audio-card,name = "rockchip,rk809-codec";
+		simple-audio-card,mclk-fs = <256>;
+		simple-audio-card,aux-devs = <&hp_amp>, <&speaker_amp>;
+		simple-audio-card,pin-switches = "Headphones", "Speaker";
+		pinctrl-names = "default";
+		pinctrl-0 = <&hp_det>;
+		/*
+		 * 3.5mm Headset Jack Detection & External Headphone Switch/Amp:
+		 * Reverse-engineered from rk_headset_all.bin.c (FUN_ffffff8008882034 / FUN_ffffff80088823c8):
+		 *   - headset_gpio     = <&gpio3 RK_PC2 GPIO_ACTIVE_LOW>  (Jack insert detect)
+		 *   - headset-ctl-gpios= <&gpio0 RK_PC3 GPIO_ACTIVE_HIGH> (Headphone amp enable, driven HIGH on insert)
+		 */
+		simple-audio-card,hp-det-gpios = <&gpio3 RK_PC2 GPIO_ACTIVE_LOW>;
+		simple-audio-card,widgets =
+			"Microphone", "Mic Jack",
+			"Headphone", "Headphones",
+			"Speaker", "Speaker";
+		simple-audio-card,routing =
+			"Headphones Amplifier INL", "HPOL",
+			"Headphones Amplifier INR", "HPOR",
+			"Headphones", "Headphones Amplifier OUTL",
+			"Headphones", "Headphones Amplifier OUTR",
+			"Speaker Amplifier INL", "SPKO",
+			"Speaker", "Speaker Amplifier OUTL";
+
+		simple-audio-card,cpu {
+			sound-dai = <&i2s1_8ch>;
+		};
+
+		simple-audio-card,codec {
+			sound-dai = <&rk809_codec>;
+		};
+	};
+
+	/* 耳机和扬声器功放由 DAPM 按实际播放路径控制，不再常开。 */
+	hp_amp: headphone-amplifier {
+		compatible = "simple-audio-amplifier";
+		enable-gpios = <&gpio0 RK_PC3 GPIO_ACTIVE_HIGH>;
+		sound-name-prefix = "Headphones Amplifier";
+	};
+
+	speaker_amp: speaker-amplifier {
+		compatible = "simple-audio-amplifier";
+		enable-gpios = <&gpio3 RK_PC3 GPIO_ACTIVE_HIGH>;
+		sound-name-prefix = "Speaker Amplifier";
+	};
+
+	/* Built-in Digital Microphone Array (PDM @ fe440000 + GPIO2_D6 enable) */
+	pdmics: dmic-codec {
+		status = "okay";
+		compatible = "dmic-codec";
+		#sound-dai-cells = <0>;
+		dmicen-gpios = <&gpio2 RK_PD6 GPIO_ACTIVE_HIGH>;
+		wakeup-delay-ms = <50>;
+	};
+
+	pdm_mic_array: pdm-mic-array {
+		status = "disabled";
+		compatible = "simple-audio-card";
+		simple-audio-card,name = "rockchip,pdm-mic-array";
+
+		simple-audio-card,cpu {
+			sound-dai = <&pdm>;
+		};
+
+		simple-audio-card,codec {
+			sound-dai = <&pdmics>;
+		};
+	};
+
+	/* HDMI Audio Output (I2S0_8CH -> HDMI) */
+	hdmi_sound: hdmi-sound {
+		status = "disabled";
+		compatible = "simple-audio-card";
+		simple-audio-card,name = "rockchip,hdmi";
+		simple-audio-card,mclk-fs = <128>;
+		simple-audio-card,format = "i2s";
+
+		simple-audio-card,cpu {
+			sound-dai = <&i2s0_8ch>;
+		};
+
+		simple-audio-card,codec {
+			sound-dai = <&hdmi>;
+		};
+	};
+
+	/* ====================================================================
+	 * 4. Input & LEDs: Lid Hall Sensor (GPIO0_B7) & System/Power/KBD LEDs
+	 *    Audited against extracted_factory.dts (lines 534-602),
+	 *    analogix_dp_zte.bin.c, and ztegpioctl_all.bin.c
+	 * ==================================================================== */
+
+	gpio-keys {
+		compatible = "gpio-keys";
+		autorepeat;
+
+		/*
+		 * Laptop Lid Hall Switch (GPIO0_B7)
+		 * In factory kernel (panel_simple_all.bin.c + analogix_dp_zte.bin.c),
+		 * lcdcover_pin = <&gpio0 RK_PB7> triggers "edp_cover_irq" on rising/falling edges.
+		 * In Mainline Linux, SW_LID natively integrates with systemd-logind!
+		 */
+		lid-switch {
+			label = "Lid Switch";
+			linux,input-type = <EV_SW>;
+			linux,code = <SW_LID>;
+			gpios = <&gpio0 RK_PB7 GPIO_ACTIVE_LOW>;
+			wakeup-source;
+		};
+	};
+
+	leds: gpio-leds {
+		compatible = "gpio-leds";
+
+		power_led: led-power {
+			label = "power_on";
+			gpios = <&gpio0 RK_PC2 GPIO_ACTIVE_HIGH>;
+			default-state = "on";
+		};
+
+		charging_led: led-charging {
+			label = "battery_charging";
+			gpios = <&gpio0 RK_PC5 GPIO_ACTIVE_HIGH>;
+			default-state = "off";
+			linux,default-trigger = "battery-charging";
+		};
+
+		battery_full_led: led-battery-full {
+			label = "battery_full";
+			gpios = <&gpio0 RK_PC6 GPIO_ACTIVE_HIGH>;
+			default-state = "off";
+			linux,default-trigger = "battery-full";
+		};
+
+		mic_mute_led: led-mic {
+			label = "mic_on";
+			gpios = <&gpio3 RK_PA4 GPIO_ACTIVE_HIGH>;
+			default-state = "off";
+		};
+
+		/*
+		 * Keyboard Backlight (GPIO2_A1)
+		 * Reverse-engineered from ztegpioctl_all.bin.c:
+		 *   gpio-keyboardbacklight = <&gpio2 RK_PA1 GPIO_ACTIVE_LOW>
+		 *   Note: ztegpioctl sets raw 0 = OFF, raw 1 = ON.
+		 */
+		kbd_backlight: led-kbd-backlight {
+			label = "zte:white:kbd_backlight";
+			gpios = <&gpio2 RK_PA1 GPIO_ACTIVE_HIGH>;
+			default-state = "off";
+		};
+
+		/* SC2021 电源已移至 vcc_sc2021；这里只保留真正的 LED/霍尔控制。 */
+		hallup_protect: led-hallup-protect {
+			label = "hallup_protect";
+			gpios = <&gpio2 RK_PB1 GPIO_ACTIVE_HIGH>;
+			default-state = "on";
+			retain-state-suspended;
+		};
+
+		hallup_change: led-hallup-change {
+			label = "hallup_change";
+			gpios = <&gpio0 RK_PC0 GPIO_ACTIVE_HIGH>;
+			default-state = "off";
+		};
+
+		hallup_state: led-hallup-state {
+			label = "hallup_state";
+			gpios = <&gpio2 RK_PC6 GPIO_ACTIVE_HIGH>;
+			default-state = "off";
+		};
+	};
+
+	/*
+	 * eDP PHY & Controller
+	 * On RK3568, eDP PHY is at 0xfdcb0000 and controller is at 0xfe0c0000.
+	 * Reverse-engineered from edp_phy_all.bin.c and factory_w620d_v12.dts.
+	 */
+	edp_phy: edp-phy@fdcb0000 {
+		compatible = "rockchip,rk3568-edp-phy";
+		reg = <0x0 0xfdcb0000 0x0 0x8000>;
+		clocks = <&pmucru XIN_OSC0_EDPPHY_G>, <&cru PCLK_EDPPHY_GRF>;
+		clock-names = "refclk", "pclk";
+		resets = <&cru SRST_P_EDPPHY_GRF>;
+		reset-names = "apb";
+		#phy-cells = <0>;
+		status = "okay";
+		zte,edp-v12-v13;
+	};
+
+	edp: edp@fe0c0000 {
+		compatible = "rockchip,rk3568-edp";
+		reg = <0x0 0xfe0c0000 0x0 0x10000>;
+		interrupts = <GIC_SPI 18 IRQ_TYPE_LEVEL_HIGH>;
+		clocks = <&pmucru XIN_OSC0_EDPPHY_G>, <&cru PCLK_EDP_CTRL>, <&cru CLK_EDP_200M>, <&cru HCLK_VO>;
+		clock-names = "dp", "pclk", "spdif", "hclk";
+		resets = <&cru SRST_EDP_24M>, <&cru SRST_P_EDP_CTRL>;
+		reset-names = "dp", "apb";
+		phys = <&edp_phy>;
+		phy-names = "dp";
+		power-domains = <&power RK3568_PD_VO>;
+		rockchip,grf = <&grf>;
+		status = "okay";
+		force-hpd;
+
+		ports {
+			#address-cells = <1>;
+			#size-cells = <0>;
+
+			edp_in: port@0 {
+				reg = <0>;
+
+				edp_in_vp1: endpoint {
+					remote-endpoint = <&vp1_out_edp>;
+				};
+			};
+
+			edp_out: port@1 {
+				reg = <1>;
+
+				edp_out_panel: endpoint {
+					remote-endpoint = <&panel_in_edp>;
+				};
+			};
+		};
+
+		aux-bus {
+			/* BOE NV140WUM-N44 通过 AUX/EDID 识别，电源参数来自本机原厂 DT。 */
+			edp_panel: panel {
+				compatible = "edp-panel";
+				backlight = <&backlight>;
+				power-supply = <&vcc3v3_lcd_edp>;
+				enable-gpios = <&gpio2 RK_PD4 GPIO_ACTIVE_HIGH>;
+				no-hpd;
+				hpd-absent-delay-ms = <200>;
+
+				port {
+					panel_in_edp: endpoint {
+						remote-endpoint = <&edp_out_panel>;
+					};
+				};
+			};
+		};
+	};
+};
+
+/* ====================================================================
+ * 5. CPU & GPU DVFS Supplies
+ * ==================================================================== */
+
+/* P3 G3: cpu-supply removed to lock CPU to fixed 1.0V and avoid DVFS undervoltage PMIC latch */
+&cpu0 {
+};
+
+&cpu1 {
+};
+
+&cpu2 {
+};
+
+&cpu3 {
+};
+
+&gpu {
+	status = "disabled";
+};
+
+/* ====================================================================
+ * 6. PMU IO Voltage Domains (CRITICAL: Audited against extracted_factory.dts)
+ *    vccio1 = 3.1V (vccio_acodec), vccio4 = 1.8V, vccio5/6/7 = 3.3V
+ * ==================================================================== */
+
+&pmu_io_domains {
+	status = "okay";
+	pmuio2-supply = <&vcc3v3_pmu>;
+	vccio1-supply = <&vccio_acodec>;
+	vccio3-supply = <&vccio_sd>;
+	vccio4-supply = <&vcc_1v8>;
+	vccio5-supply = <&vcc_3v3>;
+	vccio6-supply = <&vcc_3v3>;
+	vccio7-supply = <&vcc_3v3>;
+};
+
+/*
+ * Syscon Reboot Mode in PMUGRF (offset 0x200):
+ * Allows 'sudo reboot loader' (Rockusb) or 'sudo reboot ums' (USB Mass Storage of eMMC)
+ * from inside Mainline Linux / Armbian, and satisfies dtbo_a/b __fixups__ (&reboot_mode).
+ */
+&pmugrf {
+	reboot_mode: reboot-mode {
+		compatible = "syscon-reboot-mode";
+		offset = <0x200>;
+		mode-bootloader = <0x5242c309>;
+		mode-charge = <0x5242c30b>;
+		mode-fastboot = <0x5242c303>;
+		mode-loader = <0x5242c301>;
+		mode-normal = <0x5242c300>;
+		mode-panic = <0x5242c307>;
+		mode-recovery = <0x5242c303>;
+		mode-ums = <0x5242c30c>;
+		mode-watchdog = <0x5242c308>;
+	};
+};
+
+/* 本机 25 Wh 电池对应的原厂 BQ 配置；其他容量电池需重新核对参数。 */
+/ {
+	battery: battery {
+		compatible = "simple-battery";
+		voltage-min-design-microvolt = <7168000>;
+		constant-charge-current-max-microamp = <3000000>;
+		constant-charge-voltage-max-microvolt = <8700000>;
+	};
+};
+
+/* ====================================================================
+ * 7. I2C0: Power Management Bus
+ *    - SYR827 / RK860 CPU Buck (@40, vin = vcc5v0_sys)
+ *    - RK809 PMIC + Codec (@20)
+ *    - Southchip SC2021 Type-C PD Controller (@21, IRQ GPIO0_A4)
+ *    - TI BQ25700/BQ25703 NVDC Buck-Boost Charger (@6b, IRQ GPIO3_B7)
+ *    - SBS 1.1 Smart Battery (@0b, batid GPIO3_B2)
+ * ==================================================================== */
+
+&i2c0 {
+	status = "okay";
+	pinctrl-names = "default";
+	pinctrl-0 = <&i2c0_xfer>;
+
+	vdd_cpu: regulator@40 {
+		compatible = "silergy,syr827";
+		reg = <0x40>;
+		fcs,suspend-voltage-selector = <1>;
+		regulator-name = "vdd_cpu";
+		regulator-always-on;
+		regulator-boot-on;
+		regulator-min-microvolt = <1000000>;
+		regulator-max-microvolt = <1000000>;
+		regulator-ramp-delay = <1000>;
+		vin-supply = <&vcc5v0_sys>;
+
+		regulator-state-mem {
+			regulator-off-in-suspend;
+		};
+	};
+
+	rk809: pmic@20 {
+		compatible = "rockchip,rk809";
+		reg = <0x20>;
+		interrupt-parent = <&gpio0>;
+		interrupts = <RK_PA3 IRQ_TYPE_LEVEL_LOW>;
+		#clock-cells = <1>;
+		#sound-dai-cells = <0>;
+		clock-output-names = "rk808-clkout1", "rk808-clkout2";
+		clocks = <&cru I2S1_MCLKOUT_TX>;
+		clock-names = "mclk";
+		assigned-clocks = <&cru I2S1_MCLKOUT_TX>;
+		assigned-clock-parents = <&cru CLK_I2S1_8CH_TX>;
+		pinctrl-names = "default", "pmic-sleep", "pmic-power-off", "pmic-reset";
+		pinctrl-0 = <&pmic_int>, <&i2s1m0_mclk>, <&pmic_hwreset>;
+		pinctrl-1 = <&soc_slppin_slp>, <&rk817_slppin_slp>;
+		pinctrl-2 = <&soc_slppin_gpio>, <&rk817_slppin_pwrdn>;
+		pinctrl-3 = <&soc_slppin_gpio>, <&rk817_slppin_rst>;
+		rockchip,system-power-controller;
+		wakeup-source;
+
+		vcc1-supply = <&vcc3v3_sys>;
+		vcc2-supply = <&vcc3v3_sys>;
+		vcc3-supply = <&vcc3v3_sys>;
+		vcc4-supply = <&vcc3v3_sys>;
+		vcc5-supply = <&vcc3v3_sys>;
+		vcc6-supply = <&vcc3v3_sys>;
+		vcc7-supply = <&vcc3v3_sys>;
+		vcc8-supply = <&vcc3v3_sys>;
+		vcc9-supply = <&vcc3v3_sys>;
+
+		pwrkey {
+			status = "okay";
+		};
+
+		pinctrl_rk8xx: pinctrl_rk8xx {
+			gpio-controller;
+			#gpio-cells = <2>;
+
+			rk817_slppin_null: rk817_slppin_null {
+				pins = "gpio_slp";
+				function = "pin_fun0";
+			};
+
+			rk817_slppin_slp: rk817_slppin_slp {
+				pins = "gpio_slp";
+				function = "pin_fun1";
+			};
+
+			rk817_slppin_pwrdn: rk817_slppin_pwrdn {
+				pins = "gpio_slp";
+				function = "pin_fun2";
+			};
+
+			rk817_slppin_rst: rk817_slppin_rst {
+				pins = "gpio_slp";
+				function = "pin_fun3";
+			};
+		};
+
+		regulators {
+			vdd_logic: DCDC_REG1 {
+				regulator-name = "vdd_logic";
+				regulator-always-on;
+				regulator-boot-on;
+				regulator-min-microvolt = <500000>;
+				regulator-max-microvolt = <1350000>;
+				regulator-initial-mode = <0x2>;
+				regulator-ramp-delay = <6001>;
+
+				regulator-state-mem {
+					regulator-on-in-suspend;
+					regulator-suspend-microvolt = <900000>;
+				};
+			};
+
+			vdd_gpu: DCDC_REG2 {
+				regulator-name = "vdd_gpu";
+				regulator-always-on;
+				regulator-boot-on;
+				regulator-min-microvolt = <500000>;
+				regulator-max-microvolt = <1350000>;
+				regulator-initial-mode = <0x2>;
+				regulator-ramp-delay = <6001>;
+
+				regulator-state-mem {
+					regulator-off-in-suspend;
+				};
+			};
+
+			vcc_ddr: DCDC_REG3 {
+				regulator-name = "vcc_ddr";
+				regulator-always-on;
+				regulator-boot-on;
+				regulator-initial-mode = <0x2>;
+
+				regulator-state-mem {
+					regulator-on-in-suspend;
+				};
+			};
+
+			vdd_npu: DCDC_REG4 {
+				regulator-name = "vdd_npu";
+				regulator-always-on;
+				regulator-boot-on;
+				regulator-min-microvolt = <500000>;
+				regulator-max-microvolt = <1350000>;
+				regulator-initial-mode = <0x2>;
+				regulator-ramp-delay = <6001>;
+
+				regulator-state-mem {
+					regulator-off-in-suspend;
+				};
+			};
+
+			vcc_1v8: DCDC_REG5 {
+				regulator-name = "vcc_1v8";
+				regulator-always-on;
+				regulator-boot-on;
+				regulator-min-microvolt = <1800000>;
+				regulator-max-microvolt = <1800000>;
+
+				regulator-state-mem {
+					regulator-on-in-suspend;
+					regulator-suspend-microvolt = <1800000>;
+				};
+			};
+
+			vdda0v9_image: LDO_REG1 {
+				regulator-name = "vdda0v9_image";
+				regulator-always-on;
+				regulator-boot-on;
+				regulator-min-microvolt = <900000>;
+				regulator-max-microvolt = <900000>;
+
+				regulator-state-mem {
+					regulator-off-in-suspend;
+				};
+			};
+
+			vdda_0v9: LDO_REG2 {
+				regulator-name = "vdda_0v9";
+				regulator-always-on;
+				regulator-boot-on;
+				regulator-min-microvolt = <900000>;
+				regulator-max-microvolt = <900000>;
+
+				regulator-state-mem {
+					regulator-off-in-suspend;
+				};
+			};
+
+			vdda0v9_pmu: LDO_REG3 {
+				regulator-name = "vdda0v9_pmu";
+				regulator-always-on;
+				regulator-boot-on;
+				regulator-min-microvolt = <900000>;
+				regulator-max-microvolt = <900000>;
+
+				regulator-state-mem {
+					regulator-on-in-suspend;
+					regulator-suspend-microvolt = <900000>;
+				};
+			};
+
+			/* Audited against extracted_factory.dts line 5722: 3.1V (3100000 uV) */
+			vccio_acodec: LDO_REG4 {
+				regulator-name = "vccio_acodec";
+				regulator-always-on;
+				regulator-boot-on;
+				regulator-min-microvolt = <3100000>;
+				regulator-max-microvolt = <3100000>;
+
+				regulator-state-mem {
+					regulator-off-in-suspend;
+				};
+			};
+
+			vccio_sd: LDO_REG5 {
+				regulator-name = "vccio_sd";
+				regulator-always-on;
+				regulator-boot-on;
+				regulator-min-microvolt = <1800000>;
+				regulator-max-microvolt = <3300000>;
+
+				regulator-state-mem {
+					regulator-off-in-suspend;
+				};
+			};
+
+			vcc3v3_pmu: LDO_REG6 {
+				regulator-name = "vcc3v3_pmu";
+				regulator-always-on;
+				regulator-boot-on;
+				regulator-min-microvolt = <3300000>;
+				regulator-max-microvolt = <3300000>;
+
+				regulator-state-mem {
+					regulator-on-in-suspend;
+					regulator-suspend-microvolt = <3300000>;
+				};
+			};
+
+			vcca_1v8: LDO_REG7 {
+				regulator-name = "vcca_1v8";
+				regulator-always-on;
+				regulator-boot-on;
+				regulator-min-microvolt = <1800000>;
+				regulator-max-microvolt = <1800000>;
+
+				regulator-state-mem {
+					regulator-off-in-suspend;
+				};
+			};
+
+			vcca1v8_pmu: LDO_REG8 {
+				regulator-name = "vcca1v8_pmu";
+				regulator-always-on;
+				regulator-boot-on;
+				regulator-min-microvolt = <1800000>;
+				regulator-max-microvolt = <1800000>;
+
+				regulator-state-mem {
+					regulator-on-in-suspend;
+					regulator-suspend-microvolt = <1800000>;
+				};
+			};
+
+			vcca1v8_image: LDO_REG9 {
+				regulator-name = "vcca1v8_image";
+				regulator-always-on;
+				regulator-boot-on;
+				regulator-min-microvolt = <1800000>;
+				regulator-max-microvolt = <1800000>;
+
+				regulator-state-mem {
+					regulator-off-in-suspend;
+				};
+			};
+
+			vcc_3v3: SWITCH_REG1 {
+				regulator-name = "vcc_3v3";
+				regulator-always-on;
+				regulator-boot-on;
+
+				regulator-state-mem {
+					regulator-off-in-suspend;
+				};
+			};
+
+			vcc3v3_sd: SWITCH_REG2 {
+				regulator-name = "vcc3v3_sd";
+				regulator-always-on;
+				regulator-boot-on;
+
+				regulator-state-mem {
+					regulator-off-in-suspend;
+				};
+			};
+		};
+
+		/*
+		 * Audited against extracted_factory.dts lines 5900-5915:
+		 * Speaker Amplifier Enable = GPIO3_C3 (ACTIVE_HIGH)
+		 */
+		rk809_codec: codec {
+			status = "disabled";
+			#sound-dai-cells = <0>;
+			compatible = "rockchip,rk817-codec";
+			rockchip,mic-in-differential;
+		};
+	};
+
+	/*
+	 * SBS 1.1 Smart Battery Gauge (0x0b on I2C0)
+	 * Reverse-engineered from smart_battery_work.bin.c:
+	 *   Standard SBS 1.1 registers (0x08 Temp, 0x09 Voltage, 0x0a Current, 0x0d RSOC,
+	 *   0x0f RemCap, 0x10 FullCap, 0x16 Status, 0x17 CycleCount, 0x18 DesignCap).
+	 *   Battery presence detect pin (from factory rk809 battery subnode): GPIO3_B2 (ACTIVE_LOW).
+	 */
+	battery_gauge: battery@b {
+		compatible = "sbs,sbs-battery";
+		reg = <0x0b>;
+		sbs,i2c-retry-count = <3>;
+		sbs,poll-retry-count = <3>;
+		sbs,battery-detect-gpios = <&gpio3 RK_PB2 GPIO_ACTIVE_LOW>;
+		sbs,disable-charger-broadcasts;
+		power-supplies = <&bq25703>;
+		pinctrl-names = "default";
+		pinctrl-0 = <&bat_id>;
+	};
+
+	/*
+	 * TI BQ25703A NVDC Buck-Boost Battery Charger (0x6b on I2C0)
+	 * 使用主线 simple-battery 参数；不添加未经验证的 OTG VBUS regulator。
+	 */
+	bq25703: charger@6b {
+		compatible = "ti,bq25703a";
+		reg = <0x6b>;
+		interrupt-parent = <&gpio3>;
+		interrupts = <RK_PB7 IRQ_TYPE_LEVEL_LOW>;
+		pinctrl-names = "default";
+		pinctrl-0 = <&charger_ok_int>;
+		/* 未识别真实 PD 合约前限制为 500mA；验证后再提高。 */
+		input-current-limit-microamp = <500000>;
+		monitored-battery = <&battery>;
+		power-supplies = <&sc2021>;
+	};
+
+	/*
+	 * Southchip SC2021 Type-C PD Controller (0x21 on I2C0)
+	 * 只描述原厂已确认的 IRQ/GPIO；PD 合约字段由驱动按实际寄存器读取。
+	 */
+	sc2021: sc2021@21 {
+		compatible = "southchip,sc2021";
+		reg = <0x21>;
+		interrupt-parent = <&gpio0>;
+		interrupts = <RK_PA4 IRQ_TYPE_LEVEL_LOW>;
+		pinctrl-names = "default";
+		pinctrl-0 = <&sc2021_int>;
+		vdd-supply = <&vcc_sc2021>;
+		pdotg-gpios = <&gpio4 RK_PC5 GPIO_ACTIVE_LOW>;
+		dpdm-gpios = <&gpio4 RK_PC6 GPIO_ACTIVE_LOW>;
+		status = "okay";
+	};
+};
+
+/* ====================================================================
+ * 8. I2C4: I2C-HID Touchpad (0911:5288 at 0x2c)
+ *    Audited against extracted_factory.dts lines 5995-6011 & i2c_hid_all.bin.c:
+ *      - IRQ: GPIO3_B3 (IRQ_TYPE_LEVEL_LOW)
+ *      - Power: vcc_touchpad (GPIO3_B4 HIGH) + vcc_tp_reset (GPIO3_A1 HIGH)
+ * ==================================================================== */
+
+&i2c4 {
+	status = "disabled";
+	pinctrl-names = "default";
+	pinctrl-0 = <&i2c4m0_xfer>;
+
+	touchpad@2c {
+		compatible = "hid-over-i2c";
+		reg = <0x2c>;
+		hid-descr-addr = <0x0020>;
+		interrupt-parent = <&gpio3>;
+		interrupts = <RK_PB3 IRQ_TYPE_LEVEL_LOW>;
+		vdd-supply = <&vcc_touchpad>;
+		vddl-supply = <&vcc_tp_reset>;
+		post-power-on-delay-ms = <100>;
+		wakeup-source;
+	};
+};
+
+/* ====================================================================
+ * 9. Display Pipeline: VOP2, HDMI (vp0), and eDP (vp1)
+ *    CRITICAL AUDIT FIX (extracted_factory.dts lines 2819-2892, 3678-3731, 3819-3908):
+ *      - vp0 is routed to HDMI (&hdmi), clocked by &pmucru PLL_HPLL!
+ *      - vp1 is routed to eDP (&edp), clocked by &cru PLL_VPLL!
+ * ==================================================================== */
+
+&vop {
+	status = "okay";
+	assigned-clocks = <&cru DCLK_VOP0>, <&cru DCLK_VOP1>;
+	assigned-clock-parents = <&pmucru PLL_HPLL>, <&cru PLL_VPLL>;
+};
+
+&vop_mmu {
+	status = "okay";
+};
+
+&vp0 {
+	vp0_out_hdmi: endpoint@ROCKCHIP_VOP2_EP_HDMI0 {
+		reg = <ROCKCHIP_VOP2_EP_HDMI0>;
+		remote-endpoint = <&hdmi_in_vp0>;
+	};
+};
+
+&vp1 {
+	vp1_out_edp: endpoint@ROCKCHIP_VOP2_EP_EDP0 {
+		reg = <ROCKCHIP_VOP2_EP_EDP0>;
+		remote-endpoint = <&edp_in_vp1>;
+	};
+};
+
+&hdmi {
+	status = "disabled";
+	avdd-0v9-supply = <&vdda0v9_image>;
+	avdd-1v8-supply = <&vcca1v8_image>;
+	pinctrl-names = "default";
+	pinctrl-0 = <&hdmitx_scl &hdmitx_sda &hdmitxm0_cec>;
+};
+
+&hdmi_in {
+	hdmi_in_vp0: endpoint {
+		remote-endpoint = <&vp0_out_hdmi>;
+	};
+};
+
+&hdmi_sound {
+	status = "disabled";
+};
+
+/* ====================================================================
+ * 10. Storage: eMMC (&sdhci), MicroSD (&sdmmc0), SDIO WiFi (&sdmmc1), SPI NOR (&sfc)
+ * ==================================================================== */
+
+/* Internal 64GB Foresee FSEIASLD-64G eMMC 5.1 (HS200) */
+&sdhci {
+	bus-width = <8>;
+	max-frequency = <200000000>;
+	non-removable;
+	pinctrl-names = "default";
+	pinctrl-0 = <&emmc_bus8 &emmc_clk &emmc_cmd &emmc_datastrobe>;
+	status = "okay";
+};
+
+/*
+ * Note: This laptop has NO physical MicroSD card slot (&sdmmc0).
+ * Furthermore, GPIO0_A4 is wired to the Southchip SC2021 Type-C PD interrupt (sc2021@21),
+ * so &sdmmc0 MUST remain disabled to avoid a GPIO0_A4 conflict!
+ */
+&sdmmc0 {
+	status = "disabled";
+};
+
+/* MediaTek MT7663S SDIO WiFi (037a:7603) + BT 5.0 (037a:7663) Combo.
+ * v1 stopped immediately after "mmc_host mmc1: card is non-removable".
+ * Keep SDIO disabled for the minimal Rootfs boot candidate; Wi-Fi is a later milestone.
+ */
+&sdmmc1 {
+	bus-width = <4>;
+	cap-sd-highspeed;
+	cap-sdio-irq;
+	keep-power-in-suspend;
+	max-frequency = <150000000>;
+	mmc-pwrseq = <&sdio_pwrseq>;
+	non-removable;
+	pinctrl-names = "default";
+	pinctrl-0 = <&sdmmc1_bus4 &sdmmc1_cmd &sdmmc1_clk>;
+	sd-uhs-sdr104;
+	/* Skip CMD11 voltage switch on fixed 1.8V vqmmc rail in unifreq/ophub kernels */
+	zte,sdio-fixed-1-8v;
+	vmmc-supply = <&vcc_wl>;
+	vqmmc-supply = <&vcca1v8_pmu>;
+	status = "disabled";
+};
+
+&sfc {
+	status = "disabled";
+};
+
+/* ====================================================================
+ * 11. USB 2.0 / USB 3.0 Controllers & PHYs
+ *     CRITICAL AUDIT FIX:
+ *       - &usbhost_dwc3 (fd000000) + &u2phy0_host + &combphy1_usq drives the
+ *         internal SINO WEALTH USB Keyboard (258a:0001 on usb 7-1)!
+ *       - &usbdrd_dwc3 (fcc00000) + &u2phy0_otg + &combphy0_us drives Type-C!
+ *       - &usb_host0_ehci (fd800000) + &u2phy1_otg drives the internal UVC Webcam (usb 1-1.3)!
+ *       - &usb_host1_ehci (fd880000) + &u2phy1_host drives the USB2.0 Hub!
+ * ==================================================================== */
+
+&usb2phy0 {
+	status = "okay";
+};
+
+&usb2phy0_host {
+	phy-supply = <&vcc5v0_otg>;
+	status = "okay";
+};
+
+&usb2phy0_otg {
+	phy-supply = <&vcc5v0_otg>;
+	status = "okay";
+};
+
+&usb2phy1 {
+	status = "okay";
+};
+
+&usb2phy1_host {
+	phy-supply = <&vcc5v0_host>;
+	status = "okay";
+};
+
+&usb2phy1_otg {
+	phy-supply = <&vcc5v0_host>;
+	status = "okay";
+};
+
+&combphy0 {
+	status = "okay";
+};
+
+&combphy1 {
+	status = "okay";
+};
+
+/* USB 3.0 OTG / Type-C Port (fcc00000) */
+&usb_host0_xhci {
+	dr_mode = "host";
+	status = "okay";
+};
+
+/* USB 3.0 Host Controller (fd000000) — Connects Internal USB Keyboard (258a:0001) & USB3 Port */
+&usb_host1_xhci {
+	status = "okay";
+};
+
+/* USB 2.0 Host 0 EHCI/OHCI (fd800000 / fd840000) — Connects Internal UVC Camera (0c45:6a10) */
+&usb_host0_ehci {
+	status = "okay";
+};
+
+&usb_host0_ohci {
+	status = "okay";
+};
+
+/* USB 2.0 Host 1 EHCI/OHCI (fd880000 / fd8c0000) */
+&usb_host1_ehci {
+	status = "okay";
+};
+
+&usb_host1_ohci {
+	status = "okay";
+};
+
+/* ====================================================================
+ * 12. Audio Controllers, PWM, SARADC, TSADC, Watchdog, UARTs
+ * ==================================================================== */
+
+&i2s0_8ch {
+	status = "disabled";
+};
+
+&i2s1_8ch {
+	status = "disabled";
+	rockchip,clk-trcm = <1>;
+	pinctrl-names = "default";
+	pinctrl-0 = <&i2s1m0_sclktx
+		     &i2s1m0_lrcktx
+		     &i2s1m0_sdi0
+		     &i2s1m0_sdo0>;
+};
+
+&pdm {
+	status = "disabled";
+	#sound-dai-cells = <0>;
+	rockchip,path-map = <1 2 3 0>;
+	pinctrl-names = "default";
+	pinctrl-0 = <&pdmm0_clk
+		     &pdmm0_clk1
+		     &pdmm0_sdi1>;
+};
+
+/* PWM4/PWM5 会分别抢占耳放 GPIO0_C3 和 OTG VBUS GPIO0_C4，保持禁用。 */
+
+&pwm8 {
+	status = "okay";
+	pinctrl-names = "default";
+	pinctrl-0 = <&pwm8m0_pins>;
+};
+
+&saradc {
+	status = "disabled";
+	vref-supply = <&vcca_1v8>;
+};
+
+&tsadc {
+	status = "disabled";
+	rockchip,hw-tshut-mode = <0>;
+	rockchip,hw-tshut-polarity = <0>;
+};
+
+&wdt {
+	status = "okay";
+};
+
+&uart1 {
+	status = "disabled";
+	pinctrl-names = "default";
+	pinctrl-0 = <&uart1m0_xfer &uart1m0_ctsn>;
+};
+
+&uart2 {
+	status = "okay";
+	pinctrl-names = "default";
+	pinctrl-0 = <&uart2m0_xfer>;
+};
+
+/* ====================================================================
+ * 13. Board-Specific Pinmux Definitions (Audited from extracted_factory.dts)
+ * ==================================================================== */
+
+&pinctrl {
+	backlight {
+		bl_en_gpio: bl-en-gpio {
+			rockchip,pins = <2 RK_PD3 RK_FUNC_GPIO &pcfg_pull_none>;
+		};
+	};
+
+	battery {
+		bat_id: bat-id {
+			rockchip,pins = <3 RK_PB2 RK_FUNC_GPIO &pcfg_pull_none>;
+		};
+	};
+
+	charger {
+		charger_ok_int: charger-ok-int {
+			rockchip,pins = <3 RK_PB7 RK_FUNC_GPIO &pcfg_pull_up>;
+		};
+	};
+
+	edp {
+		edp_pwr_en: edp-pwr-en {
+			rockchip,pins = <2 RK_PD5 RK_FUNC_GPIO &pcfg_pull_none>;
+		};
+
+		edp_hpd: edp-hpd {
+			rockchip,pins = <0 RK_PC1 RK_FUNC_GPIO &pcfg_pull_none>;
+		};
+	};
+
+	headphone {
+		hp_det: hp-det {
+			rockchip,pins = <3 RK_PC2 RK_FUNC_GPIO &pcfg_pull_up>;
+		};
+	};
+
+	sc2021 {
+		sc2021_int: sc2021-int {
+			rockchip,pins =
+				<0 RK_PA4 RK_FUNC_GPIO &pcfg_pull_none>,
+				<4 RK_PC5 RK_FUNC_GPIO &pcfg_pull_down_drv_level_1>,
+				<4 RK_PC6 RK_FUNC_GPIO &pcfg_pull_down_drv_level_1>;
+		};
+	};
+
+	pmic {
+		pmic_int: pmic_int {
+			rockchip,pins = <0 RK_PA3 RK_FUNC_GPIO &pcfg_pull_up>;
+		};
+
+		pmic_hwreset: pmic_hwreset {
+			rockchip,pins = <0 RK_PA0 RK_FUNC_GPIO &pcfg_pull_up>;
+		};
+
+		soc_slppin_gpio: soc_slppin_gpio {
+			rockchip,pins = <0 RK_PA2 RK_FUNC_GPIO &pcfg_output_low>;
+		};
+
+		soc_slppin_slp: soc_slppin_slp {
+			rockchip,pins = <0 RK_PA2 1 &pcfg_pull_up>;
+		};
+
+		soc_slppin_rst: soc_slppin_rst {
+			rockchip,pins = <0 RK_PA2 2 &pcfg_pull_none>;
+		};
+	};
+
+	sdio-pwrseq {
+		wlan_power_on: wifi-power-on {
+			rockchip,pins = <0 RK_PA5 RK_FUNC_GPIO &pcfg_pull_none>;
+		};
+
+		wifi_enable_h: wifi-enable-h {
+			rockchip,pins = <0 RK_PB5 RK_FUNC_GPIO &pcfg_pull_none>;
+		};
+	};
+
+	usb {
+		vcc5v0_host_en: vcc5v0-host-en {
+			rockchip,pins = <3 RK_PA0 RK_FUNC_GPIO &pcfg_pull_none>;
+		};
+
+		vcc5v0_otg_en: vcc5v0-otg-en {
+			rockchip,pins = <0 RK_PC4 RK_FUNC_GPIO &pcfg_pull_none>;
+		};
+	};
+
+	zte_usbhub_reset {
+		zte_usbhub_reset_gpio: zte_usbhub_reset-gpio {
+			rockchip,pins = <3 RK_PA5 RK_FUNC_GPIO &pcfg_pull_none>;
+		};
+	};
+};
