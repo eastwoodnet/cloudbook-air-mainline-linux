@@ -20,6 +20,7 @@
 | `mainline-6.12/patches/0009-phy-rockchip-naneng-edp.patch` | `GPL-2.0` | Copyright (c) 2020 Rockchip Electronics Co. Ltd. (Wyon Bi) | RK3568 Naneng eDP PHY 驱动（含 V12/V13 BOE N44 参数） |
 | `mainline-6.12/patches/0010-drm-analogix-dp-rk3568-and-boe-nv140wum-n44.patch` | `GPL-2.0` | Linux DRM / Rockchip / CloudBook Air Port | RK3568 Analogix eDP 绑定与 BOE `0x0a6a` 时序条目 |
 | `mainline-6.12/patches/0011-mt76-mt7663s-w103d-sanitize-wiphy.patch` | `GPL-2.0` | CloudBook Air Linux Port | 屏蔽 W103D Wi-Fi P2P/ROC/sched_scan 以兼容 NetworkManager |
+| `mainline-6.12/patches/0012-mt76-mt7663s-w103d-fix-band-switch-disconnect.patch` | `GPL-2.0` | CloudBook Air Linux Port | 修复 `mt7615` 断连误发 `CMD 0x16` 与 W103D STA 断连 BSS/CH_PRIVILEGE 生命周期（解决 2.4G→5G 切频认证超时） |
 | `build_kernel_612.sh`, `build_boot_linux_612.sh`, `pack_boot_linux.py`, `switch_ab_slot.py`, `emmc_backup_and_migrate.sh`, `scripts/restore_factory_android.sh`, `tools/serial_bridge.py`, `rootfs_overlay/*`, `docs/*` | `MIT` / `GPL-2.0` | 本项目原创脚本与文档 | 构建、打包、槽位切换与移植文档 |
 
 ---

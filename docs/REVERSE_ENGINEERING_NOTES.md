@@ -36,7 +36,7 @@
    * `RK809` 扬声器功放 `GPIO3_C3` (`HIGH`)；3.5mm 耳机检测 `GPIO3_C2` (`ACTIVE_LOW`) 与外部耳放使能 `GPIO0_C3` (`HIGH`)；数字硅麦 `&pdm` 使能 `GPIO2_D6` (`HIGH`)；HDMI 音频走 `&i2s0_8ch`。
 5. **MT7663S SDIO Wi-Fi / 蓝牙组合芯片 (`037a:7603` / `037a:7663`)**
    * `dwmmc@fe2c0000` (`mmc1`)：Wi-Fi 供电 `GPIO0_A5` (`ACTIVE_HIGH`)、Wi-Fi 复位 `GPIO0_B5`、Wi-Fi 唤醒 `GPIO2_B2`、蓝牙复位 `GPIO2_B7` (`ACTIVE_HIGH`)、蓝牙唤醒 `GPIO2_C1`。
-   * **关键纠偏**：RK3568 `mmc1` 需执行标准 `CMD11` 1.8V 切换与 SDR104 调谐（不可套用 Amlogic `zte,sdio-fixed-1-8v`）；且为兼容 Linux 桌面 `NetworkManager` / `wpa_supplicant`，驱动侧必须屏蔽 W103D N9 固件不支持的 P2P (`P2P_CLIENT`/`P2P_GO`/`P2P_DEVICE`)、ROC 与 `sched_scan` 声明（`0011` 补丁）。
+   * **关键纠偏**：RK3568 `mmc1` 需执行标准 `CMD11` 1.8V 切换与 SDR104 调谐（不可套用 Amlogic `zte,sdio-fixed-1-8v`）；为兼容 Linux 桌面 `NetworkManager` / `wpa_supplicant`，驱动侧需屏蔽 W103D N9 固件不支持的 P2P (`P2P_CLIENT`/`P2P_GO`/`P2P_DEVICE`)、ROC 与 `sched_scan` 声明（`0011` 补丁）；此外，对照原厂 `wlan_mt7663_sdio.ko` 的断连状态机，STA 断连时不可误发 `CMD 0x16 (SET_BSS_CONNECTED)`，且必须下发 `CMD 0x12 (UPDATE_BSS_INFO, DISCONNECTED)` + `CMD 0x11 (BSS_ACTIVATE_CTRL, active=0)` 并在下次扫描或切 5 GHz 前重新激活 BSS、正确回收 `CH_PRIVILEGE`（`0012` 补丁），方可彻底消除 2.4 GHz → 5 GHz 认证超时。
 6. **Type-C PD (`sc2021@21`)、充电 (`bq25700@6b`) 与电池 (`sbs-battery@0b`)**
    * `GPIO0_A6` (`sc2021_power`) 为南芯 SC2021 芯片供电脚（原厂隐藏在 `gpio-leds` 中，`default-state = "on"`）。
    * `GPIO0_A4` 是 SC2021 中断脚（因此必须禁用无物理卡槽的 `&sdmmc0`，避免与 `cd-gpios` 冲突）。

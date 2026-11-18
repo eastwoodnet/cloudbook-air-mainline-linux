@@ -76,7 +76,7 @@
 | **耳机与麦克风** | 3.5mm 耳机口 + PDM 数字麦 | **已真机验证** | **已真机验证 (`v14`/`v19`/`v24`~`v29`)** | `gpio-114 Headphone detection` 及 `card 2 rockchip,pdm-mic-array` |
 | **USB 摄像头** | USB HD WebCam (`1bcf:2ced` Sunplus) | **已真机验证** (MJPEG 抓图通过) | **已就绪 (`v8`~`v29`)** | UVC 节点 `/dev/video3`、`/dev/video4`，供电 `GPIO3_A2` |
 | **有线网络** | 外接 USB 网卡 (CoreChips SR9900 `0fe6:9900`) | **已真机验证** (`<DEVICE_IP>` SSH) | **已真机验证 (`v8`~`v29`)** | `r8152` 补丁已内置 (`0001`)，SSH 稳定 |
-| **无线网络** | MT7663S (SDIO Wi-Fi `037a:7603`) | 暂未加载 | **已真机验证 (`v23`~`v29` + `0011`)** | 标准 `CMD11` SDR104 + `0011` 屏蔽 P2P/ROC/sched_scan，NetworkManager 重启后自动连接稳定 |
+| **无线网络** | MT7663S (SDIO Wi-Fi `037a:7603`) | 暂未加载 | **已真机验证 (`v23`~`v29` + `0011` + `0012`)** | 标准 `CMD11` SDR104 + `0011` 屏蔽 P2P/ROC/sched_scan + `0012` 修复 2.4G→5G 切频认证超时与断连 BSS 状态机，双频切换稳定 |
 | **蓝牙** | MT7663S (SDIO BT `037a:7663`) | 暂未加载 | **已真机验证 (`v23`~`v29`)** | `btmtksdio` `hci0` + `bluetoothd 5.82` 在线，鼠标/外设可连 |
 | **GPU 加速** | Mali-G52 r1 (`fde60000.gpu`) | 闭源驱动 | **已真机验证 (`v12`~`v29`)** | `panfrost` + Mesa `25.0.7` OpenGL `3.1` / ES `3.1` (`glamor` 硬件加速就绪) |
 | **电池 / PD / 充电** | SBS 电池 (`0x0b`) + SC2021 (`0x21`) + BQ25700 (`0x6b`) | 已验证 | **已真机验证 (`v25`~`v29`)** | `0008` 驱动支持 PD 快充阶梯与充电管理；`v27`+`v28` 支持霍尔合盖深睡与唤醒 |

@@ -123,7 +123,7 @@ tar -xf linux-6.12.117.tar.xz -C linux-6.12 --strip-components=1
 ```
 
 #### 3.3 一键应用补丁并编译内核、模块与 DTS
-仓库内 `mainline-6.12/patches/` 已集成全部必需补丁（`0001` SR9900 USB 网卡、`0003` VPLL `659MHz`、`0005`~`0007`+`0011` MT7663S Wi-Fi/蓝牙与 NetworkManager 兼容、`0008` 南芯 SC2021 PD + BQ25700 充电、`0009`+`0010` RK3568 Naneng eDP PHY 与 BOE NV140WUM-N44 屏幕）：
+仓库内 `mainline-6.12/patches/` 已集成全部必需补丁（`0001` SR9900 USB 网卡、`0003` VPLL `659MHz`、`0005`~`0007`+`0011`+`0012` MT7663S Wi-Fi/蓝牙、NetworkManager 兼容与 2.4G↔5G 切频修复、`0008` 南芯 SC2021 PD + BQ25700 充电、`0009`+`0010` RK3568 Naneng eDP PHY 与 BOE NV140WUM-N44 屏幕）：
 
 * **先编译 U 盘首测版 DTS（`v28`，引导参数 `root=LABEL=ROOTFS`）**：
   ```bash

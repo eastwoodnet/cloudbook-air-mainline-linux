@@ -1,0 +1,318 @@
+From: CloudBook Air Linux Port <port@cloudbookair.local>
+Subject: [PATCH] mt76: mt7663s: fix 2.4 GHz to 5 GHz band-switch auth timeout on W103D
+
+Fix two issues that caused MT7663S (W103D / N9 firmware 7663mp1827) to
+time out during 5 GHz authentication (and stall subsequent firmware
+scans) after previously associating on 2.4 GHz:
+
+1. In mt7615_mac_set_beacon_filter(), honor the @enable parameter for
+   STA interfaces (matching mt7921). Previously, disconnecting a STA
+   passed !phy->n_beacon_vif (true) to mt7615_mcu_set_bss_pm(),
+   re-sending CMD 0x16 (SET_BSS_CONNECTED) on disconnect and leaving
+   beacon filtering enabled.
+
+2. In mt7663s_w103d.c, track and release CH_PRIVILEGE (CMD 0x1c)
+   immediately when acquired in set_channel() so failed 5 GHz auth does
+   not leak a channel grant, and mirror the vendor gen4m disconnect
+   sequence on STA disassociation: send CMD 0x12 (UPDATE_BSS_INFO,
+   DISCONNECTED / sta_rec_idx_ap=0xfe / cleared RLM) followed by
+   CMD 0x11 (BSS_ACTIVATE_CTRL, active=0), re-activating the BSS
+   before subsequent scans or 5 GHz channel switches.
+---
+diff --git a/drivers/net/wireless/mediatek/mt76/mt7615/mac.c b/drivers/net/wireless/mediatek/mt76/mt7615/mac.c
+index 4f416eb..834708f 100644
+--- a/drivers/net/wireless/mediatek/mt76/mt7615/mac.c
++++ b/drivers/net/wireless/mediatek/mt76/mt7615/mac.c
+@@ -2279,6 +2279,7 @@ int mt7615_mac_set_beacon_filter(struct mt7615_phy *phy,
+ {
+ 	struct mt7615_dev *dev = phy->dev;
+ 	bool ext_phy = phy != &dev->phy;
++	bool bcn_filter;
+ 	int err;
+ 
+ 	if (!mt7615_firmware_offload(dev))
+@@ -2299,11 +2300,12 @@ int mt7615_mac_set_beacon_filter(struct mt7615_phy *phy,
+ 		break;
+ 	}
+ 
+-	err = mt7615_mcu_set_bss_pm(dev, vif, !phy->n_beacon_vif);
++	bcn_filter = enable && !phy->n_beacon_vif;
++	err = mt7615_mcu_set_bss_pm(dev, vif, bcn_filter);
+ 	if (err)
+ 		return err;
+ 
+-	if (phy->n_beacon_vif) {
++	if (!bcn_filter) {
+ 		vif->driver_flags &= ~IEEE80211_VIF_BEACON_FILTER;
+ 		mt76_clear(dev, MT_WF_RFCR(ext_phy),
+ 			   MT_WF_RFCR_DROP_OTHER_BEACON);
+diff --git a/drivers/net/wireless/mediatek/mt76/mt7663s/mt7663s_w103d.c b/drivers/net/wireless/mediatek/mt76/mt7663s/mt7663s_w103d.c
+index 8264d02..d43e108 100644
+--- a/drivers/net/wireless/mediatek/mt76/mt7663s/mt7663s_w103d.c
++++ b/drivers/net/wireless/mediatek/mt76/mt7663s/mt7663s_w103d.c
+@@ -17,6 +17,7 @@
+ #include "mt7663s_w103d.h"
+ 
+ #define MCU_CMD_VENDOR_BSS_ACTIVATE_CTRL 0x11
++#define MCU_CMD_VENDOR_UPDATE_BSS_INFO 0x12
+ #define MCU_CMD_VENDOR_CH_PRIVILEGE 0x1c
+ #define MCU_CMD_VENDOR_UPDATE_STA_RECORD 0x13
+ #define MCU_CMD_VENDOR_REMOVE_STA_RECORD 0x14
+@@ -57,6 +58,11 @@ struct mt7663s_w103d_intr_state {
+ 	bool eeprom_settle_pending;
+ 	bool suppress_noack_completion;
+ 	bool join_privilege_held;
++	bool bss_deactivated;
++	u8 last_bss_idx;
++	u8 last_omac_idx;
++	u8 last_bmc_wlan_idx;
++	u8 last_bss_mac[ETH_ALEN];
+ 	bool fw_scan_pending;
+ 	struct completion fw_scan_done;
+ 	atomic_t irq_queued;
+@@ -1428,6 +1434,143 @@ mt7663s_w103d_sync_bss_rlm(struct mt7615_dev *dev,
+ 		&req, sizeof(req), false);
+ }
+ 
++/* gen4m CMD_SET_BSS_INFO (CID 0x12, 116 bytes) matching wlan_mt7663_sdio.ko
++ * nicUpdateBss().  Used on disconnect to transition N9's internal BSS state
++ * back to PARAM_MEDIA_STATE_DISCONNECTED and clear stale RLM parameters.
++ */
++struct mt7663s_w103d_vendor_bss_info {
++	u8 bss_idx;
++	u8 conn_state;
++	u8 op_mode;
++	u8 ssid_len;
++	u8 ssid[32];
++	u8 bssid[ETH_ALEN];
++	u8 is_qbss;
++	u8 rsv1;
++	__le16 op_rate_set;
++	__le16 basic_rate_set;
++	u8 sta_rec_idx_ap;
++	u8 rsv2;
++	__le16 hw_default_fixed_rate;
++	u8 non_ht_basic_phy_type;
++	u8 auth_mode;
++	u8 enc_status;
++	u8 phy_type_set;
++	u8 wapi_mode;
++	u8 is_ap_mode;
++	u8 bmc_wlan_idx;
++	u8 hidden_ssid_mode;
++	u8 disconn_detect_th;
++	u8 rsv3[3];
++	__le32 private_data;
++	struct mt7663s_w103d_bss_rlm rlm;
++	u8 dbdc_band;
++	u8 wmm_set;
++	u8 dbdc_action;
++	u8 nss;
++	u8 rsv4[22];
++} __packed;
++
++static_assert(sizeof(struct mt7663s_w103d_vendor_bss_info) == 116);
++static_assert(offsetof(struct mt7663s_w103d_vendor_bss_info, rlm) == 0x44);
++static_assert(offsetof(struct mt7663s_w103d_vendor_bss_info, dbdc_band) == 0x5a);
++
++static int
++mt7663s_w103d_vendor_bss_activate_raw(struct mt7615_dev *dev, u8 bss_idx,
++				      u8 omac_idx, u8 bmc_wlan_idx,
++				      const u8 *mac, bool active)
++{
++	struct mt7663s_w103d_intr_state *state =
++		mt7663s_w103d_intr_state(&dev->mt76);
++	struct {
++		u8 bss_idx;
++		u8 active;
++		u8 net_type;
++		u8 omac_idx;
++		u8 bss_mac[ETH_ALEN];
++		u8 bmc_wlan_idx;
++		u8 rsv;
++	} __packed act = {
++		.bss_idx = bss_idx,
++		.active = active,
++		.net_type = 0,
++		.omac_idx = omac_idx,
++		.bmc_wlan_idx = bmc_wlan_idx ? bmc_wlan_idx : 1,
++	};
++	int ret;
++
++	if (active && mac)
++		memcpy(act.bss_mac, mac, ETH_ALEN);
++
++	ret = mt76_mcu_send_msg(&dev->mt76,
++				MCU_CMD_VENDOR_SET(MCU_CMD_VENDOR_BSS_ACTIVATE_CTRL),
++				&act, sizeof(act), false);
++	if (!ret && state) {
++		state->last_bss_idx = bss_idx;
++		state->last_omac_idx = omac_idx;
++		state->last_bmc_wlan_idx = act.bmc_wlan_idx;
++		if (mac)
++			memcpy(state->last_bss_mac, mac, ETH_ALEN);
++		WRITE_ONCE(state->bss_deactivated, !active);
++	}
++
++	return ret;
++}
++
++static int
++mt7663s_w103d_vendor_bss_activate(struct mt7615_dev *dev,
++				  struct ieee80211_vif *vif, bool active)
++{
++	struct mt7615_vif *mvif = (struct mt7615_vif *)vif->drv_priv;
++
++	return mt7663s_w103d_vendor_bss_activate_raw(dev, mvif->mt76.idx,
++						     mvif->mt76.omac_idx,
++						     mvif->sta.wcid.idx,
++						     vif->addr, active);
++}
++
++static int mt7663s_w103d_channel_privilege(struct mt7615_dev *dev,
++					   struct cfg80211_chan_def *chandef,
++					   bool request);
++
++static void
++mt7663s_w103d_vendor_disconnect_bss(struct mt7615_dev *dev,
++				    struct ieee80211_vif *vif)
++{
++	struct mt7615_vif *mvif = (struct mt7615_vif *)vif->drv_priv;
++	struct mt7663s_w103d_intr_state *state =
++		mt7663s_w103d_intr_state(&dev->mt76);
++	struct mt7663s_w103d_vendor_bss_info req = {
++		.bss_idx = mvif->mt76.idx,
++		/* PARAM_MEDIA_STATE_DISCONNECTED in gen4m ABI */
++		.conn_state = 1,
++		.op_mode = 0,
++		/* STA_REC_INDEX_NOT_FOUND */
++		.sta_rec_idx_ap = 0xfe,
++		.bmc_wlan_idx = mvif->sta.wcid.idx ? mvif->sta.wcid.idx : 1,
++		.rlm = {
++			.bss_idx = mvif->mt76.idx,
++		},
++		/* ENUM_BAND_AUTO */
++		.dbdc_band = 4,
++		.wmm_set = mvif->mt76.wmm_idx,
++		.nss = max_t(u8, hweight8(dev->mphy.antenna_mask), 1),
++	};
++	int upd_ret, deact_ret;
++
++	if (state && xchg(&state->join_privilege_held, false))
++		mt7663s_w103d_channel_privilege(dev, &dev->mphy.chandef, false);
++
++	upd_ret = mt76_mcu_send_msg(&dev->mt76,
++				    MCU_CMD_VENDOR_SET(MCU_CMD_VENDOR_UPDATE_BSS_INFO),
++				    &req, sizeof(req), false);
++	deact_ret = mt7663s_w103d_vendor_bss_activate(dev, vif, false);
++
++	dev_info(dev->mt76.dev,
++		 "W103D: vendor BSS disconnect bss=%u update=%d deact=%d\n",
++		 mvif->mt76.idx, upd_ret, deact_ret);
++}
++
+ void mt7663s_w103d_note_assoc(struct ieee80211_hw *hw,
+ 			      struct ieee80211_vif *vif, u64 changed)
+ {
+@@ -1437,6 +1580,14 @@ void mt7663s_w103d_note_assoc(struct ieee80211_hw *hw,
+ 		mt7663s_w103d_intr_state(&dev->mt76);
+ 	int ret;
+ 
++	if ((changed & BSS_CHANGED_ASSOC) && !vif->cfg.assoc &&
++	    vif->type == NL80211_IFTYPE_STATION) {
++		mt7615_mutex_acquire(dev);
++		mt7663s_w103d_vendor_disconnect_bss(dev, vif);
++		mt7615_mutex_release(dev);
++		return;
++	}
++
+ 	if (vif->cfg.assoc &&
+ 	    (changed & (BSS_CHANGED_ASSOC | BSS_CHANGED_BANDWIDTH |
+ 			BSS_CHANGED_HT | BSS_CHANGED_ERP_SLOT |
+@@ -1453,10 +1604,6 @@ void mt7663s_w103d_note_assoc(struct ieee80211_hw *hw,
+ 		WRITE_ONCE(state->join_privilege_held, true);
+ }
+ 
+-static int mt7663s_w103d_channel_privilege(struct mt7615_dev *dev,
+-					   struct cfg80211_chan_def *chandef,
+-					   bool request);
+-
+ #define W103D_FW_SCAN_TIMEOUT_MS	6000
+ 
+ static void mt7663s_w103d_mark_scan_pending(struct mt76_dev *mdev)
+@@ -1546,31 +1693,10 @@ int mt7663s_w103d_hw_scan(struct ieee80211_hw *hw,
+ 	 */
+ 	mt7615_mutex_acquire(dev);
+ 	if (!vif->cfg.assoc) {
+-		struct mt7615_vif *mvif = (struct mt7615_vif *)vif->drv_priv;
+-		struct {
+-			u8 bss_idx;
+-			u8 active;
+-			u8 net_type;
+-			u8 omac_idx;
+-			u8 bss_mac[ETH_ALEN];
+-			u8 bmc_wlan_idx;
+-			u8 rsv;
+-		} __packed act = {
+-			.bss_idx = mvif->mt76.idx,
+-			.active = 1,
+-			.net_type = 0,
+-			.omac_idx = mvif->mt76.omac_idx,
+-			.bmc_wlan_idx = mvif->sta.wcid.idx ?
+-					mvif->sta.wcid.idx : 1,
+-		};
+-
+ 		/* Unassociated active scan requires N9 BSS activation first so
+ 		 * Probe Request TX uses a valid activated BSS/OMAC slot.
+ 		 */
+-		memcpy(act.bss_mac, vif->addr, ETH_ALEN);
+-		mt76_mcu_send_msg(&dev->mt76,
+-				  MCU_CMD_VENDOR_SET(MCU_CMD_VENDOR_BSS_ACTIVATE_CTRL),
+-				  &act, sizeof(act), false);
++		mt7663s_w103d_vendor_bss_activate(dev, vif, true);
+ 	}
+ 	mt7663s_w103d_mark_scan_pending(&dev->mt76);
+ 	ret = mt76_connac_mcu_hw_scan(mphy, vif, req);
+@@ -1760,6 +1886,8 @@ int mt7663s_w103d_set_channel(struct mt76_phy *mphy)
+ 	struct mt7615_phy *phy = mphy->priv;
+ 	struct mt7615_dev *dev = phy->dev;
+ 	struct cfg80211_chan_def *chandef = &mphy->chandef;
++	struct mt7663s_w103d_intr_state *state =
++		mt7663s_w103d_intr_state(&dev->mt76);
+ 	bool use_privilege;
+ 	int ret;
+ 
+@@ -1768,8 +1896,11 @@ int mt7663s_w103d_set_channel(struct mt76_phy *mphy)
+ 
+ 	use_privilege = chandef->chan->band == NL80211_BAND_5GHZ &&
+ 			!mphy->offchannel;
+-	if (use_privilege)
++	if (use_privilege || (state && xchg(&state->join_privilege_held, false))) {
++		if (state)
++			WRITE_ONCE(state->join_privilege_held, false);
+ 		mt7663s_w103d_channel_privilege(dev, chandef, false);
++	}
+ 
+ 	ret = mt7615_set_channel(mphy);
+ 	if (ret)
+@@ -1783,9 +1914,19 @@ int mt7663s_w103d_set_channel(struct mt76_phy *mphy)
+ 	if (!use_privilege)
+ 		return 0;
+ 
++	if (state && READ_ONCE(state->bss_deactivated))
++		mt7663s_w103d_vendor_bss_activate_raw(dev, state->last_bss_idx,
++						      state->last_omac_idx,
++						      state->last_bmc_wlan_idx,
++						      state->last_bss_mac,
++						      true);
++
+ 	ret = mt7663s_w103d_channel_privilege(dev, chandef, true);
+-	if (!ret)
++	if (!ret) {
++		if (state)
++			WRITE_ONCE(state->join_privilege_held, true);
+ 		msleep(100);
++	}
+ 
+ 	return ret;
+ }
